@@ -1,0 +1,254 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{url}
+
+\begin{document}
+
+\title{From Segmented Meshes to Queryable Semantic Digital Twins:\\
+VLM-Driven Ontology Grounding for 3D Indoor Scenes}
+
+\author{\IEEEauthorblockN{Anonymous Authors}
+\IEEEauthorblockA{\textit{Institute} \\
+City, Country \\
+anonymous@example.org}
+}
+
+\maketitle
+
+\begin{abstract}
+TODO.
+\end{abstract}
+
+\begin{IEEEkeywords}
+semantic digital twin, vision-language model, 3D scene understanding, ontology, knowledge graph
+\end{IEEEkeywords}
+
+\section{Introduction}
+TODO.
+
+\section{Related Work}
+TODO.
+
+\section{Overview}
+TODO.
+
+\section{Mesh Reconstruction and Segmentation}
+\label{sec:recon}
+TODO. (This stage is covered in detail in the companion paper~\cite{semdt_stage1}.)
+
+\section{From Segmented Mesh to Semantic Digital Twin}
+\label{sec:pipeline}
+
+Given a segmented 3D mesh produced by the upstream reconstruction stage
+(Section~\ref{sec:recon}), the goal of this stage is to construct a
+\emph{semantic digital twin} (SemDT): a persistent, queryable
+representation in which every segmented object is instantiated as a typed
+entity in an ontology of indoor objects, with its geometry, pose, and
+inter-object relations captured in a relational knowledge base.
+
+The input is a collection of per-object triangle meshes together with an
+inherited, partial taxonomy of \texttt{SemanticAnnotation} classes drawn
+from the CRAM/\texttt{semantic\_digital\_twin} ontology. The output is an
+instantiated \texttt{World} object, serialised to PostgreSQL via the
+ORMatic object--relational mapper, in which each object is assigned a
+concrete ontology class and the constructor-level dependencies between
+annotations (e.g., a \texttt{Drawer} belongs to a \texttt{Cabinet}) are
+resolved.
+
+The stage is organised as a three-phase pipeline.
+
+\subsection{Phase 1: Multi-View Class Extraction}
+\label{sec:extract}
+
+Classifying 3D objects directly from meshes is difficult for
+general-purpose vision--language models (VLMs), which are trained
+predominantly on 2D imagery. We therefore reduce the problem to a 2D
+visual question answering task. The scene is rendered from three fixed
+camera viewpoints (top, front-right, and front-left for Warsaw-style
+scenes; auto-computed from the scene bounding box for HM3D). Objects are
+processed in groups of $N$ (default $N{=}8$); within each group, the
+target bodies are highlighted by overriding their mesh vertex colors
+with a set of maximally distinct CSS3 colors, while the remaining scene
+geometry is rendered in its original appearance to preserve spatial
+context.
+
+The three rendered views of the group are encoded as base64 PNG payloads
+and submitted to a VLM (Qwen3-VL-30B-A3B-Instruct via OpenRouter) together
+with: (i) a JSON schema listing the highlight color assigned to each
+object, (ii) the closest CSS3 color name for disambiguation, and (iii)
+the flattened list of available ontology labels from the taxonomy
+export. The VLM is asked to return, for each highlighted object, a
+predicted class label, a confidence score, and a short free-text
+justification. Grouping objects reduces the number of VLM calls by an
+order of magnitude relative to per-object querying while still allowing
+the model to reason about each object in the context of its neighbours.
+
+\subsection{Phase 2: Taxonomy-Aligned Label Refinement}
+\label{sec:refine}
+
+Raw VLM labels are lexically noisy: they may be synonyms of taxonomy
+entries (\emph{fridge} vs.\ \emph{refrigerator}), morphological
+variants (\emph{washer dryer} vs.\ \emph{washer-dryer}), or novel labels
+that need to be introduced into the taxonomy. We resolve this in a
+refinement step that uses sentence-level word embeddings to compute the
+cosine similarity between each predicted label and every available
+taxonomy class. Matches above an acceptance threshold are folded onto
+the canonical class (e.g., \emph{fridge}~$\to$~\emph{refrigerator},
+similarity 0.96); below-threshold predictions are preserved as candidate
+new taxonomy entries for downstream review.
+
+\subsection{Phase 3: Dependency Resolution and Persistence}
+\label{sec:persist}
+
+Many classes in the target ontology are not leaf concepts but structured
+annotations whose constructors reference other annotations. For example,
+instantiating a \texttt{Handle} requires a parent
+\texttt{PrismaticConnection}; instantiating a \texttt{Drawer} requires a
+\texttt{Cabinet} container. A naive instantiation order fails whenever a
+required neighbour has not yet been created.
+
+We address this with a three-step procedure. First, for each segmented
+body we use the refined label from Phase~2 to look up the most specific
+compatible \texttt{SemanticAnnotation} subclass in the taxonomy. Second,
+we traverse the constructor signature of that class and, for each
+unresolved argument, recursively instantiate or match an existing
+annotation of the required type, calling a lightweight LLM
+(Llama-3.3-70B-Instruct) only where the dependency cannot be satisfied
+by geometric heuristics. Third, the resulting annotation graph is
+topologically sorted and instantiated in dependency order, yielding a
+valid \texttt{World} object. The world is persisted to PostgreSQL via
+ORMatic so that it can be reloaded, rendered, and queried by downstream
+reasoning components without re-running the VLM.
+
+\subsection{Batch Execution}
+
+The three phases are driven by a batch runner that iterates over all
+rooms of a scene, caches VLM responses for reproducibility, records the
+per-run taxonomy snapshot, and logs git commit hashes and model
+identifiers into an experiment metadata file. This makes runs
+reproducible across taxonomy evolutions: the same segmented mesh
+re-processed against a later taxonomy yields a controlled set of
+label changes attributable to the taxonomy rather than to VLM
+non-determinism.
+
+\section{Evaluation}
+\label{sec:eval}
+
+We evaluate the pipeline on scenes from the Habitat-Matterport 3D
+(HM3D) semantic annotations dataset~\cite{hm3d} and, in future work,
+on two real-world scenes (an instrumented kitchen and an office)
+captured and reconstructed by the upstream stage.
+
+\subsection{HM3D: Stage-2 Evaluation against Ground Truth}
+\label{sec:eval_hm3d}
+
+HM3D scenes provide per-face ground-truth (GT) labels in a
+\texttt{.semantic.txt} lookup table, which allows us to evaluate the
+classification component of the pipeline in isolation from the
+reconstruction stage. We use three scenes from the HM3D \emph{minival}
+split that cover a mix of residential floor plans and room counts:
+\texttt{00802}, \texttt{00803}, and \texttt{00808}.
+
+\paragraph{Protocol.}
+For every segmented object, the pipeline produces a predicted label
+which is aligned to the HM3D GT label vocabulary via the
+embedding-based refinement of Section~\ref{sec:refine}. We report:
+\emph{precision} and \emph{recall} of predicted labels against GT
+labels; their harmonic mean (\emph{F1}); and a \emph{mean IoU}
+(\emph{mIoU}) computed per class as the intersection-over-union of the
+sets of objects assigned to that class in GT vs.\ prediction,
+macro-averaged across classes present in either set. True positives,
+false positives, and false negatives are counted at the
+(room, object) level.
+
+\paragraph{Results.}
+Table~\ref{tab:hm3d} summarises the per-scene metrics. Across the three
+scenes the pipeline achieves a mean precision of $0.834$, recall of
+$0.676$, F1 of $0.746$, and mIoU of $0.534$. Precision is consistently
+high ($>\!0.82$ on all scenes), indicating that when the VLM commits to
+a label and the refinement step accepts it, the label is usually
+correct. Recall is lower, reflecting (i) objects for which no taxonomy
+class is a close enough match and the prediction is rejected by the
+refinement threshold, and (ii) systematic confusions on visually
+ambiguous or small classes (see error analysis below).
+
+\begin{table}[t]
+\centering
+\caption{Stage-2 classification performance on three HM3D scenes.
+TP / FP / FN are counted per (room, object); mIoU is the macro-averaged
+per-class intersection-over-union of label assignments.}
+\label{tab:hm3d}
+\begin{tabular}{lccccc}
+\toprule
+Scene & Precision & Recall & F1 & mIoU & TP / FP / FN \\
+\midrule
+00802 & 0.847 & 0.675 & 0.751 & 0.575 & 714 / 129 / 344 \\
+00803 & 0.826 & 0.635 & 0.718 & 0.459 & 530 / 112 / 305 \\
+00808 & 0.829 & 0.718 & 0.770 & 0.567 & 597 / 123 / 234 \\
+\midrule
+\textbf{Mean} & \textbf{0.834} & \textbf{0.676} & \textbf{0.746} & \textbf{0.534} & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Error analysis.}
+Inspecting the per-class IoU breakdown on scene~\texttt{00808} reveals
+three dominant failure modes. (i)~\emph{Taxonomy-level synonymy not
+captured by embeddings}: labels such as \emph{poster} are matched
+against \emph{picture} with similarity~$0.52$, below our acceptance
+threshold, so they become false negatives on GT classes for which the
+taxonomy does in fact carry a suitable class. (ii)~\emph{Visual
+confusions on thin or occluded geometry}: the model confuses
+\emph{cloth} with \emph{towel} (sim.~$0.66$) and \emph{handle} with
+\emph{broom} when only a fragment of the object is visible in all three
+views. (iii)~\emph{Fine-grained container classes}: \emph{kitchen
+cabinet} is correctly retrieved only for $3.8\%$ of GT instances, most
+cabinets being labelled with the coarser \emph{cabinet} (IoU~$0.12$).
+Conversely, common and visually distinctive categories
+(\emph{microwave}, \emph{refrigerator}, \emph{toilet},
+\emph{dishwasher}, \emph{curtain}, \emph{television}) achieve IoU $=
+1.0$ on all three scenes.
+
+\paragraph{Scene 00800 (pilot).}
+An earlier pilot run on scene~\texttt{00800} (59 objects) achieved an
+object-level accuracy of $91.5\%$ ($54/59$ correct) using an earlier
+taxonomy snapshot. These numbers are not directly comparable to
+Table~\ref{tab:hm3d} because that run used per-object rather than
+per-(room,object) counting and predated the embedding-based refinement,
+and we report them here only for historical context.
+
+\subsection{Ablations}
+\label{sec:ablations}
+TODO: report effect of number of camera viewpoints, group size $N$,
+embedding acceptance threshold, and with/without prior-label conditioning.
+
+\subsection{Real-World Scenes: End-to-End Evaluation}
+\label{sec:eval_real}
+TODO: full-pipeline evaluation on the IAI Kitchen and WTU Office
+scenes, including reconstruction quality (Stage~1) and classification
+quality (Stage~2) against a manually curated ground truth.
+
+\subsection{Qualitative Results}
+\label{sec:qualitative}
+TODO: side-by-side renders of GT-coloured vs.\ predicted-coloured
+scenes; taxonomy subtree visualisations; example queries against the
+instantiated knowledge base.
+
+\section{Discussion}
+TODO.
+
+\section{Conclusion}
+TODO.
+
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}
