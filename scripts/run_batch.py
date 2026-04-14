@@ -362,17 +362,17 @@ def run_extract(
 
     log.info("Running: %s", " ".join(cmd))
 
-    # Stream stdout to terminal while capturing it
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    # Stream combined stdout+stderr to terminal. Merging into one pipe
+    # avoids a deadlock where a full stderr buffer blocks the child while
+    # the parent is only draining stdout.
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, bufsize=1)
     for line in proc.stdout:
         print(line, end="", flush=True)
     proc.wait()
-    stderr = proc.stderr.read()
 
     if proc.returncode != 0:
-        log.error("Extract failed for %s:\nSTDERR: %s",
-                  scene_dir.name, stderr[-2000:])
+        log.error("Extract failed for %s (exit %d)", scene_dir.name, proc.returncode)
         return False, None
 
     # Read per-room database IDs from the mapping file written by extract
@@ -405,16 +405,15 @@ def run_refine(
 
     log.info("Running: %s", " ".join(cmd))
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, bufsize=1)
     for line in proc.stdout:
         print(line, end="", flush=True)
     proc.wait()
-    stderr = proc.stderr.read()
 
     if proc.returncode != 0:
-        log.error("Refine failed for %s:\nSTDERR: %s",
-                  summary_json.parent.name, stderr[-2000:])
+        log.error("Refine failed for %s (exit %d)",
+                  summary_json.parent.name, proc.returncode)
         return False
 
     log.info("Refine complete for %s (world_database_id=%d)",
@@ -442,15 +441,14 @@ def run_persist(
 
     log.info("Running: %s", " ".join(cmd))
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, bufsize=1)
     for line in proc.stdout:
         print(line, end="", flush=True)
     proc.wait()
-    stderr = proc.stderr.read()
 
     if proc.returncode != 0:
-        log.error("Persist failed:\nSTDERR: %s", stderr[-2000:])
+        log.error("Persist failed (exit %d)", proc.returncode)
         return False
 
     log.info("Persist complete")

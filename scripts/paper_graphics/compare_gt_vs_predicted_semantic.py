@@ -457,6 +457,59 @@ def save_csv(
     print(f"\nCSV saved to {path}")
 
 
+def load_csv(path: Path) -> tuple[dict, list[dict], int, int]:
+    """Inverse of save_csv: parse a results CSV back into (metrics, norm_log,
+    n_predicted, n_ground_truth). Sections are separated by blank rows and
+    identified by their header."""
+    per_class_iou: dict[str, float] = {}
+    aggregate: dict[str, float] = {}
+    norm_log: list[dict] = []
+    section: str | None = None
+
+    with open(path, newline="") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if not row or all(c == "" for c in row):
+                section = None
+                continue
+            if row == ["class", "iou"]:
+                section = "iou"
+                continue
+            if row == ["metric", "value"]:
+                section = "metric"
+                continue
+            if row == ["original", "matched_to", "similarity", "accepted"]:
+                section = "norm"
+                continue
+            if section == "iou":
+                per_class_iou[row[0]] = float(row[1])
+            elif section == "metric":
+                aggregate[row[0]] = float(row[1])
+            elif section == "norm":
+                norm_log.append({
+                    "original": row[0],
+                    "matched_to": row[1],
+                    "similarity": float(row[2]),
+                    "accepted": row[3] in ("True", "true", "1"),
+                })
+
+    tp = int(aggregate.get("true_positives", 0))
+    fp = int(aggregate.get("false_positives", 0))
+    fn = int(aggregate.get("false_negatives", 0))
+
+    metrics = {
+        "true_positives": tp,
+        "false_positives": fp,
+        "false_negatives": fn,
+        "precision": aggregate.get("precision", 0.0),
+        "recall": aggregate.get("recall", 0.0),
+        "f1_score": aggregate.get("f1_score", 0.0),
+        "miou": aggregate.get("miou", 0.0),
+        "per_class_iou": per_class_iou,
+    }
+    return metrics, norm_log, tp + fp, tp + fn
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -476,9 +529,14 @@ def main():
         "--world-db-id", type=int, nargs="+",
         help="Database ID(s) of persisted world(s) to evaluate.",
     )
+    source.add_argument(
+        "--from-csv", type=Path,
+        help="Replay statistics from a CSV previously produced by --csv.",
+    )
     parser.add_argument(
-        "--scene-dir", type=Path, required=True,
-        help="HM3D semantic annotation directory containing *.semantic.txt.",
+        "--scene-dir", type=Path,
+        help="HM3D semantic annotation directory containing *.semantic.txt. "
+             "Not required with --from-csv.",
     )
     parser.add_argument(
         "--threshold", type=float, default=0.55,
@@ -489,6 +547,14 @@ def main():
         help="Save results to a CSV file.",
     )
     args = parser.parse_args()
+
+    if args.from_csv:
+        metrics, norm_log, n_pred, n_gt = load_csv(args.from_csv)
+        print_results(metrics, norm_log, [None] * n_pred, [None] * n_gt)
+        return
+
+    if args.scene_dir is None:
+        parser.error("--scene-dir is required unless --from-csv is used")
 
     # Collect all predicted labels across rooms
     print("Loading predicted labels from DB...")
