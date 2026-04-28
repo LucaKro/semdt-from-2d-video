@@ -548,10 +548,14 @@ Respond with valid JSON:
             try:
                 kwargs = {}
 
-                # Handle body field — use HasRootKinematicStructureEntity
-                # which is the common base for HasRootBody, HasRootRegion,
-                # HasDoors, etc., all of which define root: KinematicStructureEntity.
-                if issubclass(cls, HasRootKinematicStructureEntity) and annotation.body_id:
+                # Handle body field — HasRootKinematicStructureEntity covers the
+                # mixin family (HasRootBody, HasRootRegion, HasDoors, …); the
+                # SemanticEnvironmentAnnotation branch (Ceiling, Light, …) inherits
+                # `root` separately via RootedSemanticAnnotation.
+                if (
+                    issubclass(cls, (HasRootKinematicStructureEntity, RootedSemanticAnnotation))
+                    and annotation.body_id
+                ):
                     body = next(
                         (
                             b
@@ -564,6 +568,11 @@ Respond with valid JSON:
                         kwargs["root"] = body
                     else:
                         raise ValueError(f"Body {annotation.body_id} not found")
+
+                # SemanticEnvironmentAnnotation.__post_init__ dereferences
+                # self._world to resolve its kinematic branch, so the world
+                # backreference must be set at construction time.
+                kwargs["_world"] = self.world
 
                 # Handle other field assignments
                 for field_name, value in annotation.field_assignments.items():
@@ -789,7 +798,7 @@ def main(args):
     existing_dao_names = _get_existing_dao_names()
 
     for obj in summary:
-        if obj.get("confidence", 0) < args.min_confidence:
+        if (obj.get("confidence") or 0) < args.min_confidence:
             logging.warning(
                 f"Skipping {obj['body_id']} ({obj['class']}) due to low confidence"
             )

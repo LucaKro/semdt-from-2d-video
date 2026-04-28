@@ -7,11 +7,12 @@ each semantically annotated object is a separate Body with a TriangleMesh.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 from uuid import UUID
 
 import numpy as np
 import trimesh
+from scipy.spatial import cKDTree
 
 from semantic_digital_twin.datastructures.prefixed_name import PrefixedName
 from semantic_digital_twin.spatial_types import HomogeneousTransformationMatrix
@@ -22,10 +23,15 @@ from semantic_digital_twin.world_description.shape_collection import ShapeCollec
 from semantic_digital_twin.world_description.world_entity import Body
 
 
+# HM3D GLBs follow the Habitat/OpenGL Y-up convention. All camera math
+# in this loader depends on that assumption.
+HM3D_UP_AXIS = np.array([0.0, 1.0, 0.0])
+
+
 def _look_at(
     eye: np.ndarray,
     target: np.ndarray,
-    up: np.ndarray = np.array([0.0, 1.0, 0.0]),
+    up: np.ndarray = HM3D_UP_AXIS,
 ) -> np.ndarray:
     """Compute a camera-to-world 4x4 transform (OpenGL: camera looks along -Z)."""
     forward = target - eye
@@ -65,6 +71,11 @@ class HM3DWorldLoader:
       - <scene_id>.semantic.txt  (color -> label lookup table)
 
     Optionally accepts a path to the visual GLB for textured rendering.
+    Textured rendering is performed by projecting colors sampled from the
+    visual GLB onto each face of the room's semantic meshes (nearest-face
+    lookup in a KD-tree of visual-GLB face centroids). This avoids the need
+    to crop the visual GLB and guarantees the render contains exactly the
+    room's geometry.
     """
 
     scene_dir: Optional[Path] = None
@@ -85,11 +96,16 @@ class HM3DWorldLoader:
     """Mapping from RGB color tuple to SemanticObject."""
 
     _scene_id: str = field(init=False, default="")
-    _original_visuals: Dict[UUID, object] = field(init=False, default_factory=dict)
-    """Saved copy of each body's mesh visual for reset after highlighting."""
+    _original_visuals: Dict[UUID, np.ndarray] = field(init=False, default_factory=dict)
+    """Semantic per-face colors for each body; used to restore after highlighting."""
 
-    _visual_scene: Optional[trimesh.Scene] = field(init=False, default=None)
-    """Pre-loaded textured visual scene from the visual GLB (if available)."""
+    _textured_visuals: Dict[UUID, np.ndarray] = field(init=False, default_factory=dict)
+    """Per-face RGBA arrays sampled from the visual GLB, keyed by body id.
+    Populated only if a visual GLB is available."""
+
+    _shell_body_ids: Set[UUID] = field(init=False, default_factory=set)
+    """Bodies loaded as structural shell (room_id=0) when filtering by room.
+    Rendered for context/occlusion, excluded from VLM targets and highlighting."""
 
     def __post_init__(self):
         if self.world is not None:
@@ -97,7 +113,8 @@ class HM3DWorldLoader:
             self._scene_id = self.world.name or ""
             self.annotations = {}
             self._original_visuals = {}
-            self._visual_scene = None
+            self._textured_visuals = {}
+            self._shell_body_ids = set()
             self._save_original_state()
             return
         self.scene_dir = Path(self.scene_dir)
@@ -105,7 +122,7 @@ class HM3DWorldLoader:
         self.annotations = self._parse_semantic_txt()
         self.world = self._build_world()
         self._save_original_state()
-        self._load_visual_scene()
+        self._project_visual_textures_onto_semantic_meshes()
 
     @classmethod
     def from_world(cls, world: World) -> "HM3DWorldLoader":
@@ -123,7 +140,8 @@ class HM3DWorldLoader:
         loader.annotations = {}
         loader._scene_id = world.name or ""
         loader._original_visuals = {}
-        loader._visual_scene = None
+        loader._textured_visuals = {}
+        loader._shell_body_ids = set()
         loader._save_original_state()
         return loader
 
@@ -134,7 +152,6 @@ class HM3DWorldLoader:
             raise FileNotFoundError(
                 f"No .semantic.txt file found in {self.scene_dir}"
             )
-        # e.g. "TEEsavR23oF.semantic.txt" -> "TEEsavR23oF"
         return txt_files[0].stem.replace(".semantic", "")
 
     @staticmethod
@@ -163,60 +180,6 @@ class HM3DWorldLoader:
     def semantic_txt_path(self) -> Path:
         return self.scene_dir / f"{self._scene_id}.semantic.txt"
 
-    def _load_visual_scene(self) -> None:
-        """Load the textured visual GLB if a path was provided.
-
-        When *room_id* is set, crops the visual scene to the bounding box of
-        the room's semantic meshes (with a small margin) so that textured
-        renders show only the room.
-        """
-        if self.visual_glb_path is None:
-            return
-        path = Path(self.visual_glb_path)
-        if not path.exists():
-            print(f"Warning: visual GLB not found at {path}, "
-                  f"original renders will use semantic colors")
-            return
-        self._visual_scene = trimesh.load(str(path))
-
-        if self.room_id is not None and self.object_bodies:
-            self._crop_visual_scene_to_room()
-
-    def _crop_visual_scene_to_room(self, margin: float = 0.5) -> None:
-        """Crop the visual scene to the AABB of the room's semantic meshes."""
-        all_verts = np.vstack(
-            [body.collision[0].mesh.vertices for body in self.object_bodies]
-        )
-        bbox_min = all_verts.min(axis=0) - margin
-        bbox_max = all_verts.max(axis=0) + margin
-
-        if not isinstance(self._visual_scene, trimesh.Scene):
-            return
-
-        to_remove = []
-        for name, geom in list(self._visual_scene.geometry.items()):
-            if not isinstance(geom, trimesh.Trimesh) or len(geom.vertices) == 0:
-                to_remove.append(name)
-                continue
-            # Keep only vertices inside the AABB
-            inside = np.all(
-                (geom.vertices >= bbox_min) & (geom.vertices <= bbox_max),
-                axis=1,
-            )
-            if not inside.any():
-                to_remove.append(name)
-                continue
-            # Keep faces where all three vertices are inside
-            face_mask = inside[geom.faces].all(axis=1)
-            if not face_mask.any():
-                to_remove.append(name)
-                continue
-            geom.update_faces(face_mask)
-            geom.remove_unreferenced_vertices()
-
-        for name in to_remove:
-            self._visual_scene.delete_geometry(name)
-
     # ------------------------------------------------------------------
     # Parsing
     # ------------------------------------------------------------------
@@ -226,7 +189,7 @@ class HM3DWorldLoader:
         annotations: Dict[Tuple[int, int, int], SemanticObject] = {}
         lines = self.semantic_txt_path.read_text().splitlines()
 
-        for line in lines[1:]:  # skip header ("HM3D Semantic Annotations")
+        for line in lines[1:]:
             line = line.strip()
             if not line:
                 continue
@@ -257,7 +220,6 @@ class HM3DWorldLoader:
         """Load the semantic GLB, split by annotation color, and build a World."""
         scene = trimesh.load(str(self.semantic_glb_path))
 
-        # Collect all trimesh geometries into a single mesh so we can split uniformly
         meshes: List[trimesh.Trimesh] = []
         if isinstance(scene, trimesh.Scene):
             for geom in scene.geometry.values():
@@ -270,8 +232,6 @@ class HM3DWorldLoader:
                 f"Unexpected type from trimesh.load: {type(scene)}"
             )
 
-        # Group faces across all geometries by their annotation color
-        # Key: (r,g,b) -> list of (vertices, faces) ready to be concatenated
         color_groups: Dict[Tuple[int, int, int], List[trimesh.Trimesh]] = {}
 
         for mesh in meshes:
@@ -279,16 +239,20 @@ class HM3DWorldLoader:
             # instead of ColorVisuals — convert so we can read per-face colors.
             if hasattr(mesh.visual, "to_color"):
                 mesh.visual = mesh.visual.to_color()
-            face_colors = mesh.visual.face_colors[:, :3]  # (N, 3) uint8 RGB
+            face_colors = mesh.visual.face_colors[:, :3]
             unique_colors = np.unique(face_colors, axis=0)
 
             for color in unique_colors:
                 key = tuple(int(c) for c in color)
 
-                # Early room filter: skip colors not belonging to the target room
                 if self.room_id is not None:
                     annotation = self.annotations.get(key)
-                    if annotation is None or annotation.room_id != self.room_id:
+                    # Keep faces for the target room AND structural shell
+                    # (room_id=0) — shells provide walls/floors that would
+                    # otherwise be dropped at room boundaries.
+                    if annotation is None or annotation.room_id not in (
+                        self.room_id, 0,
+                    ):
                         continue
 
                 mask = np.all(face_colors == color, axis=1)
@@ -297,7 +261,6 @@ class HM3DWorldLoader:
                     continue
                 color_groups.setdefault(key, []).append(submesh)
 
-        # Build the World
         world = World(name=f"hm3d_{self._scene_id}")
         root = Body(name=PrefixedName("root"))
 
@@ -309,12 +272,10 @@ class HM3DWorldLoader:
                 annotation = self.annotations.get(rgb)
 
                 if annotation is None:
-                    # Face color not in the lookup table -- skip
                     continue
 
                 body_name = f"{annotation.label}_{annotation.object_id}"
 
-                # Paint the submesh with its annotation color for visual identity
                 r, g, b = rgb
                 combined.visual.face_colors = np.array(
                     [r, g, b, 255], dtype=np.uint8
@@ -340,6 +301,13 @@ class HM3DWorldLoader:
                 )
                 world.add_connection(connection)
 
+                if (
+                    self.room_id is not None
+                    and annotation.room_id == 0
+                    and annotation.room_id != self.room_id
+                ):
+                    self._shell_body_ids.add(body.id)
+
         return world
 
     # ------------------------------------------------------------------
@@ -347,14 +315,9 @@ class HM3DWorldLoader:
     # ------------------------------------------------------------------
 
     def get_bodies_by_label(self, label: str) -> List[Body]:
-        """Return all bodies whose name contains the given semantic label."""
-        return [
-            body for body in self.world.bodies
-            if label in body.name.name
-        ]
+        return [body for body in self.world.bodies if label in body.name.name]
 
     def get_bodies_in_room(self, room_id: int) -> List[Body]:
-        """Return all bodies belonging to the given room."""
         room_object_names = {
             f"{ann.label}_{ann.object_id}"
             for ann in self.annotations.values()
@@ -367,85 +330,174 @@ class HM3DWorldLoader:
 
     @property
     def labels(self) -> List[str]:
-        """Return the sorted list of unique semantic labels in this scene."""
         return sorted({ann.label for ann in self.annotations.values()})
 
     @property
     def room_ids(self) -> List[int]:
-        """Return the sorted list of room IDs in this scene."""
         return sorted({ann.room_id for ann in self.annotations.values()})
 
     @property
     def object_bodies(self) -> List[Body]:
-        """Return all bodies except the root (i.e. all semantic objects)."""
+        """Target-room bodies (excludes root and structural shell bodies)."""
+        return [
+            b for b in self.world.bodies
+            if b.name.name != "root" and b.id not in self._shell_body_ids
+        ]
+
+    @property
+    def _renderable_bodies(self) -> List[Body]:
+        """All non-root bodies, including structural shell bodies."""
         return [b for b in self.world.bodies if b.name.name != "root"]
 
     # ------------------------------------------------------------------
-    # Rendering & highlighting (mirrors WarsawWorldLoader interface)
+    # Texture projection
+    # ------------------------------------------------------------------
+
+    def _project_visual_textures_onto_semantic_meshes(self) -> None:
+        """Sample colors from the visual GLB onto each face of each room body.
+
+        For each body, for each face, looks up the nearest face in the visual
+        GLB (KD-tree over visual face centroids) and reads that face's color.
+        Results are cached in ``self._textured_visuals`` keyed by body id.
+        """
+        if self.visual_glb_path is None:
+            return
+        path = Path(self.visual_glb_path)
+        if not path.exists():
+            print(f"Warning: visual GLB not found at {path}, "
+                  f"textured rendering will fall back to semantic colors")
+            return
+
+        scene = trimesh.load(str(path))
+        visual_meshes: List[trimesh.Trimesh] = []
+        if isinstance(scene, trimesh.Scene):
+            visual_meshes = [
+                g for g in scene.geometry.values()
+                if isinstance(g, trimesh.Trimesh) and len(g.faces) > 0
+            ]
+        elif isinstance(scene, trimesh.Trimesh):
+            visual_meshes = [scene]
+        if not visual_meshes:
+            return
+
+        # Build a KD-tree over all visual face centroids, tracking face colors.
+        centroids: List[np.ndarray] = []
+        colors: List[np.ndarray] = []
+        for m in visual_meshes:
+            if hasattr(m.visual, "to_color"):
+                m.visual = m.visual.to_color()
+            face_rgba = np.asarray(m.visual.face_colors, dtype=np.uint8)
+            if face_rgba.shape[0] != len(m.faces):
+                # Some visuals return one color — broadcast.
+                face_rgba = np.tile(face_rgba.reshape(-1)[:4], (len(m.faces), 1))
+            centroids.append(m.triangles.mean(axis=1))
+            colors.append(face_rgba)
+
+        all_centroids = np.vstack(centroids)
+        all_colors = np.vstack(colors)
+        tree = cKDTree(all_centroids)
+
+        for body in self._renderable_bodies:
+            mesh = body.collision[0].mesh
+            face_centroids = mesh.triangles.mean(axis=1)
+            _, idx = tree.query(face_centroids, k=1)
+            self._textured_visuals[body.id] = all_colors[idx].astype(np.uint8)
+
+    # ------------------------------------------------------------------
+    # Rendering & highlighting
     # ------------------------------------------------------------------
 
     def _save_original_state(self) -> None:
-        """Snapshot each body's mesh face colors so we can restore after highlighting."""
-        for body in self.object_bodies:
+        """Snapshot each body's semantic face colors for later restoration."""
+        for body in self._renderable_bodies:
             mesh = body.collision[0].mesh
             if hasattr(mesh.visual, "to_color"):
                 mesh.visual = mesh.visual.to_color()
             self._original_visuals[body.id] = mesh.visual.face_colors.copy()
 
     def _reset_body_colors(self) -> None:
-        """Restore all bodies to their original face colors."""
-        for body in self.object_bodies:
+        """Restore all bodies to their original (semantic) face colors."""
+        for body in self._renderable_bodies:
             mesh = body.collision[0].mesh
             mesh.visual.face_colors = self._original_visuals[body.id]
 
     def _neutralize_body_colors(self) -> None:
         """Set all bodies to a uniform neutral gray.
 
-        Call this before ``_apply_highlight_to_group`` so that only the
+        Call this before ``_apply_highlight_to_group`` so only the
         highlighted objects carry distinct colors in the rendered image.
         """
         gray = np.array([180, 180, 180, 255], dtype=np.uint8)
-        for body in self.object_bodies:
+        for body in self._renderable_bodies:
             mesh = body.collision[0].mesh
             mesh.visual.face_colors = gray
 
     @staticmethod
     def _apply_highlight_to_group(bodies: List[Body]) -> Dict[UUID, Color]:
-        """Apply distinct highlight colors to a group of bodies.
-
-        Returns a mapping from body id to the Color that was applied.
-        """
+        """Apply distinct highlight colors to a group of bodies."""
         colors = Color.distinct_html_colors(len(bodies))
         for body, color in zip(bodies, colors):
             body_mesh = body.collision[0]
             body_mesh.override_mesh_with_color(color)
         return {body.id: color for body, color in zip(bodies, colors)}
 
+    # Labels whose bodies should be hidden from outside-camera views so
+    # they don't occlude the room interior.
+    DEFAULT_HIDDEN_LABELS: Set[str] = frozenset({"ceiling"})
+
     def render_scene_from_camera_pose(
-        self, camera_transform, output_filepath=None, headless=False,
+        self,
+        camera_transform,
+        output_filepath=None,
+        headless=False,
         use_visual_mesh=False,
+        hide_labels: Optional[Iterable[str]] = None,
     ) -> bytes:
         """Render the world from a single camera pose, return PNG bytes.
 
-        If *use_visual_mesh* is True and a visual GLB was loaded, render
-        the textured visual scene instead of the semantic-colored bodies.
+        If *use_visual_mesh* is True and texture projection was performed,
+        bodies are rendered with their projected textured colors instead of
+        the semantic annotation colors. Highlight colors (applied via
+        ``_apply_highlight_to_group``) always take precedence because they
+        overwrite ``mesh.visual`` directly.
+
+        ``hide_labels`` lists label substrings (e.g. ``"ceiling"``) whose
+        bodies should be excluded from the render but kept in the World.
+        Defaults to ``{"ceiling"}``.
         """
         resolution = (1024, 768)
+        hide_labels = set(
+            self.DEFAULT_HIDDEN_LABELS if hide_labels is None else hide_labels
+        )
 
-        if use_visual_mesh and self._visual_scene is not None:
-            scene = self._visual_scene.copy()
-        else:
+        # Optionally swap in textured face colors for the duration of this render.
+        swapped: List[Tuple[object, np.ndarray]] = []
+        if use_visual_mesh and self._textured_visuals:
+            for body in self._renderable_bodies:
+                cached = self._textured_visuals.get(body.id)
+                if cached is None:
+                    continue
+                mesh = body.collision[0].mesh
+                swapped.append((mesh, mesh.visual.face_colors.copy()))
+                mesh.visual.face_colors = cached
+
+        try:
             scene = trimesh.Scene()
-            for body in self.object_bodies:
+            for body in self._renderable_bodies:
+                if any(lbl in body.name.name for lbl in hide_labels):
+                    continue
                 mesh = body.collision[0].mesh
                 if mesh is not None:
                     scene.add_geometry(mesh, node_name=body.name.name)
 
-        if headless:
-            png = self._render_offscreen(scene, camera_transform, resolution)
-        else:
-            scene.graph[scene.camera.name] = camera_transform
-            png = scene.save_image(resolution=resolution, visible=True)
+            if headless:
+                png = self._render_offscreen(scene, camera_transform, resolution)
+            else:
+                scene.graph[scene.camera.name] = camera_transform
+                png = scene.save_image(resolution=resolution, visible=True)
+        finally:
+            for mesh, original in swapped:
+                mesh.visual.face_colors = original
 
         png = self._autocrop_png(png)
 
@@ -463,7 +515,6 @@ class HM3DWorldLoader:
         img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
         arr = np.array(img)
 
-        # Mask of non-white pixels (any channel < 255)
         non_white = np.any(arr < 250, axis=2)
         if not non_white.any():
             return png_bytes
@@ -473,7 +524,6 @@ class HM3DWorldLoader:
         rmin, rmax = np.where(rows)[0][[0, -1]]
         cmin, cmax = np.where(cols)[0][[0, -1]]
 
-        # Add margin, clamped to image bounds
         h, w = arr.shape[:2]
         rmin = max(0, rmin - margin)
         rmax = min(h - 1, rmax + margin)
@@ -499,11 +549,6 @@ class HM3DWorldLoader:
         from PIL import Image
         import io
 
-        # Prepare meshes for pyrender:
-        # 1. Convert TextureVisuals to ColorVisuals — avoids GL texture
-        #    uploads which fail under EGL with PyOpenGL_accelerate.
-        # 2. Unmerge vertices so face colors become per-vertex (pyrender
-        #    rejects face colors on smooth meshes).
         for geom in trimesh_scene.geometry.values():
             if isinstance(geom, trimesh.Trimesh):
                 if hasattr(geom.visual, "to_color"):
@@ -516,11 +561,9 @@ class HM3DWorldLoader:
                 pr_mesh = pyrender.Mesh.from_trimesh(geom, smooth=False)
                 pr_scene.add(pr_mesh, name=name)
 
-        # Add a camera
         camera = pyrender.PerspectiveCamera(yfov=np.pi / 3.0)
         pr_scene.add(camera, pose=camera_transform)
 
-        # Add a directional light so the scene is visible
         light = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0], intensity=3.0)
         pr_scene.add(light, pose=camera_transform)
 
@@ -546,10 +589,9 @@ class HM3DWorldLoader:
         """
         if bodies is None:
             bodies = self.object_bodies
-        all_vertices = [
-            body.collision[0].mesh.vertices for body in bodies
-        ]
-        vertices = np.vstack(all_vertices)
+        vertices = np.vstack(
+            [body.collision[0].mesh.vertices for body in bodies]
+        )
         centroid = vertices.mean(axis=0)
 
         extent = vertices.max(axis=0) - vertices.min(axis=0)

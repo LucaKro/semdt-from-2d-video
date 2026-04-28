@@ -309,10 +309,17 @@ def main(args):
         # Always process room-by-room for HM3D.
         # --num-rooms limits how many rooms to process (default: all).
         all_room_ids = HM3DWorldLoader.discover_room_ids(obj_dir)
-        if args.num_rooms is not None:
-            room_ids = all_room_ids[:args.num_rooms]
+        # room_id=0 in HM3D is typically the "unassigned" bucket: scattered
+        # structural elements and unknown objects that don't belong to any
+        # well-formed room. Skip it by default.
+        if args.include_unassigned_room:
+            candidate_room_ids = all_room_ids
         else:
-            room_ids = all_room_ids
+            candidate_room_ids = [r for r in all_room_ids if r != 0]
+        if args.num_rooms is not None:
+            room_ids = candidate_room_ids[:args.num_rooms]
+        else:
+            room_ids = candidate_room_ids
         print(f"Will process {len(room_ids)} room(s): {room_ids} "
               f"(out of {len(all_room_ids)} total)")
 
@@ -620,6 +627,13 @@ if __name__ == "__main__":
         default=False,
         help="Do not send HM3D ground truth body names as prior semantic labels "
              "to the VLM. Use this for unbiased evaluation.",
+    )
+    parser.add_argument(
+        "--include-unassigned-room",
+        action="store_true",
+        default=False,
+        help="HM3D only: include room_id=0 (typically the 'unassigned' bucket "
+             "of scattered structural elements). Skipped by default.",
     )
     parser.add_argument(
         "--num-rooms",
