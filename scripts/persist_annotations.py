@@ -369,14 +369,13 @@ def persist_one_room(
             else:
                 kwargs[field_name] = value
 
-        # SemanticAnnotation.__post_init__ accesses self._world
-        # (via self.kinematic_structure_entities), but _world is
-        # init=False and only set later by add_to_world().  Inject
-        # it before __init__ so __post_init__ doesn't crash.
-        instance = cls.__new__(cls)
-        object.__setattr__(instance, "_world", world)
-        instance.__init__(**kwargs)
-        return instance
+        # SemanticEnvironmentAnnotation.__post_init__ resolves its
+        # kinematic branch via self._world. On WorldEntity (the base
+        # for SemanticAnnotation) _world is kw_only but init=True, so
+        # the dataclass __init__ resets it to its default None unless
+        # we pass it explicitly.
+        kwargs["_world"] = world
+        return cls(**kwargs)
 
     # Iterate until no more progress (handles dependency ordering)
     remaining = list(ann_by_id.keys())
