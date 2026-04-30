@@ -14,6 +14,7 @@ Process:
 """
 
 import argparse
+import inspect
 import json
 import logging
 import os
@@ -521,96 +522,143 @@ Respond with valid JSON:
 
     def instantiate_all(self) -> Tuple[List[SemanticAnnotation], List[Dict[str, Any]]]:
         """
-        Instantiate all pending annotations in dependency order.
-        Returns (list of instances, list of result records).
+        Instantiate all pending annotations.
+
+        Uses multi-pass iteration so that an annotation whose
+        SemanticAnnotation-typed kwargs reference other pending
+        annotations is retried until those dependencies have been
+        instantiated.  When a dependency cannot be instantiated, the
+        dependent is also skipped (no partial construction).
+
+        The whole loop runs inside ``world.modify_world()`` because some
+        annotations (notably ``SemanticRobotAnnotation`` subclasses such
+        as ``Sensor``/``SmokeDetector``) self-register in their
+        ``__post_init__`` via ``world.add_semantic_annotation``, which
+        is wrapped in ``@atomic_world_modification`` and requires the
+        modification context.
         """
-        order = self.get_instantiation_order()
         instances: Dict[str, SemanticAnnotation] = {}
-        results = []
+        skipped: Dict[str, str] = {}  # ann_id -> failure reason
 
-        for ann_id in order:
-            annotation = self.pending_annotations[ann_id]
+        body_map = {str(b.id): b for b in self.world.bodies}
+
+        def _try_instantiate(
+            annotation: PendingAnnotation,
+        ) -> Tuple[Optional[SemanticAnnotation], Optional[str]]:
+            """Try to construct one annotation.
+
+            Returns ``(instance, None)`` on success, ``(None, reason)``
+            for a permanent skip, or ``(None, None)`` to signal that a
+            dependency is not yet instantiated (retry later).
+            """
             cls_name = annotation.class_name
-
             if cls_name not in self.class_lookup:
-                results.append(
-                    {
-                        "annotation_id": ann_id,
-                        "class": cls_name,
-                        "status": "failed",
-                        "error": f"Class {cls_name} not found",
-                    }
-                )
-                continue
-
+                return None, f"Class {cls_name} not found"
             cls = self.class_lookup[cls_name]
 
-            try:
-                kwargs = {}
+            kwargs: Dict[str, Any] = {}
 
-                # Handle body field — HasRootKinematicStructureEntity covers the
-                # mixin family (HasRootBody, HasRootRegion, HasDoors, …); the
-                # SemanticEnvironmentAnnotation branch (Ceiling, Light, …) inherits
-                # `root` separately via RootedSemanticAnnotation.
-                if (
-                    issubclass(cls, (HasRootKinematicStructureEntity, RootedSemanticAnnotation))
-                    and annotation.body_id
-                ):
-                    body = next(
-                        (
-                            b
-                            for b in self.world.bodies
-                            if str(b.id) == annotation.body_id
-                        ),
-                        None,
+            # Handle body field — HasRootKinematicStructureEntity covers the
+            # mixin family (HasRootBody, HasRootRegion, HasDoors, …); the
+            # SemanticEnvironmentAnnotation branch (Ceiling, Light, …) inherits
+            # `root` separately via RootedSemanticAnnotation.
+            needs_root = issubclass(
+                cls, (HasRootKinematicStructureEntity, RootedSemanticAnnotation)
+            )
+            if needs_root:
+                if not annotation.body_id:
+                    return None, (
+                        f"{cls_name} requires a root body but the pending "
+                        f"annotation has no body_id (likely an inferred "
+                        f"placeholder created to fill another annotation's slot)"
                     )
-                    if body:
-                        kwargs["root"] = body
-                    else:
-                        raise ValueError(f"Body {annotation.body_id} not found")
+                body = body_map.get(annotation.body_id)
+                if body is None:
+                    return None, f"Body {annotation.body_id} not found in world"
+                kwargs["root"] = body
 
-                # SemanticEnvironmentAnnotation.__post_init__ dereferences
-                # self._world to resolve its kinematic branch, so the world
-                # backreference must be set at construction time.
-                kwargs["_world"] = self.world
+            # SemanticEnvironmentAnnotation.__post_init__ dereferences
+            # self._world to resolve its kinematic branch, so the world
+            # backreference must be set at construction time.
+            kwargs["_world"] = self.world
 
-                # Handle other field assignments
-                for field_name, value in annotation.field_assignments.items():
-                    if isinstance(value, str) and value in instances:
-                        kwargs[field_name] = instances[value]
-                    elif isinstance(value, str) and value in self.pending_annotations:
-                        # Dependency not yet instantiated - this shouldn't happen with proper ordering
-                        logging.warning(
-                            f"Dependency {value} not yet instantiated for {cls_name}.{field_name}"
+            for field_name, value in annotation.field_assignments.items():
+                if isinstance(value, str) and value in instances:
+                    kwargs[field_name] = instances[value]
+                elif isinstance(value, str) and value in skipped:
+                    return None, (
+                        f"depends on skipped annotation {value} for field "
+                        f"{field_name}: {skipped[value]}"
+                    )
+                elif isinstance(value, str) and value in self.pending_annotations:
+                    # Dependency not yet instantiated — retry on a later pass.
+                    return None, None
+                else:
+                    kwargs[field_name] = value
+
+            try:
+                instance = cls(**kwargs)
+            except Exception as e:
+                return None, f"{type(e).__name__}: {e}"
+            return instance, None
+
+        with self.world.modify_world():
+            remaining = list(self.pending_annotations.keys())
+            max_passes = len(remaining) + 1
+            for _ in range(max_passes):
+                next_remaining: List[str] = []
+                progress = False
+                for ann_id in remaining:
+                    annotation = self.pending_annotations[ann_id]
+                    instance, reason = _try_instantiate(annotation)
+                    if instance is not None:
+                        instances[ann_id] = instance
+                        progress = True
+                        logging.info(
+                            f"Created {annotation.class_name} instance (id: {ann_id})"
+                        )
+                    elif reason is not None:
+                        skipped[ann_id] = reason
+                        progress = True
+                        logging.error(
+                            f"Failed to create {annotation.class_name}: {reason}"
                         )
                     else:
-                        kwargs[field_name] = value
+                        next_remaining.append(ann_id)
+                remaining = next_remaining
+                if not remaining or not progress:
+                    break
 
-                instance = cls(**kwargs)
-                instances[ann_id] = instance
+            for ann_id in remaining:
+                annotation = self.pending_annotations[ann_id]
+                reason = "unresolvable dependencies after all instantiation passes"
+                skipped[ann_id] = reason
+                logging.error(
+                    f"Failed to create {annotation.class_name}: {reason}"
+                )
 
+        results: List[Dict[str, Any]] = []
+        for ann_id, annotation in self.pending_annotations.items():
+            if ann_id in instances:
                 results.append(
                     {
                         "annotation_id": ann_id,
-                        "class": cls_name,
+                        "class": annotation.class_name,
                         "body_id": annotation.body_id,
                         "source": annotation.source,
                         "status": "created",
                     }
                 )
-                logging.info(f"Created {cls_name} instance (id: {ann_id})")
-
-            except Exception as e:
+            else:
                 results.append(
                     {
                         "annotation_id": ann_id,
-                        "class": cls_name,
+                        "class": annotation.class_name,
                         "body_id": annotation.body_id,
                         "status": "failed",
-                        "error": str(e),
+                        "error": skipped.get(ann_id, "unknown"),
                     }
                 )
-                logging.error(f"Failed to create {cls_name}: {e}")
 
         return list(instances.values()), results
 
@@ -714,10 +762,23 @@ def _safe_class_name(proposed: str, existing_dao_names: Set[str]) -> str:
 
 
 def build_class_lookup() -> Dict[str, Type]:
-    """Build a name -> class lookup from the semantic_annotations module and generated_classes if it exists."""
+    """Build a name -> class lookup from the semantic_annotations module and generated_classes if it exists.
+
+    Classes that are still abstract (i.e. ``inspect.isabstract`` is
+    True — they have unimplemented ``@abstractmethod`` members) are
+    excluded so that the VLM/heuristic pipeline can never select one
+    as either a target class or a superclass for a generated class.
+    Otherwise generated classes like ``Television(SemanticRobotAnnotation)``
+    inherit ``assign_to_robot`` without an implementation and crash at
+    instantiation with ``Can't instantiate abstract class …``.  When an
+    abstract base is filtered, the superclass-resolution code falls
+    back to ``SemanticAnnotation`` (see ``main``).
+    """
     lookup = {}
     classes, _, _ = get_classes_of_ormatic_interface(ormatic_interface)
     for cls in filter(lambda c: issubclass(c, SemanticAnnotation), classes):
+        if inspect.isabstract(cls):
+            continue
         lookup[cls.__name__] = cls
 
     # Also try to import from generated_classes.py if it exists
@@ -730,6 +791,7 @@ def build_class_lookup() -> Dict[str, Type]:
                     isinstance(obj, type)
                     and issubclass(obj, SemanticAnnotation)
                     and obj is not SemanticAnnotation
+                    and not inspect.isabstract(obj)
                 ):
                     lookup[name] = obj
                     logging.info(f"Loaded generated class: {name}")
