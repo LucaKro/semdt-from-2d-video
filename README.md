@@ -139,60 +139,141 @@ Note: only a subset of minival scenes have semantic annotations (00800, 00802, 0
 
 ## Usage
 
-**Extract class structure** from a scene directory (renders images, queries a VLM, persists the world to the database):
+The pipeline has three stages, run per scene (and per room, when scenes are split by HM3D rooms):
+
+1. **Extract** — render scenes, query the VLM, persist a bare `World` to the DB.
+2. **Refine** — for each VLM-classified object, resolve constructor-field dependencies and instantiate `SemanticAnnotation` subclasses, generating new annotation classes on the fly.
+3. **Persist** — regenerate the ORM once for all newly generated classes and write the annotated worlds back to the DB.
+
+### Recommended: orchestrated batch runs
+
+`run_batch.py` is the entry point. It discovers all annotated HM3D scenes, runs all three stages with per-scene output isolation, tracks DB IDs across stages, and is resumable.
 
 ```bash
-python scripts/extract_class_structure.py <obj_dir> <output.json> --export-dir <export_dir>
+# Run every scene with semantic annotations (00800, 00802, 00803, 00808)
+python scripts/run_batch.py
+
+# Run specific scenes
+python scripts/run_batch.py --scenes 00800 00803
+
+# Resume the latest experiment, skipping completed stages
+python scripts/run_batch.py --resume
+
+# Resume a specific experiment dir by inspecting what's on disk
+python scripts/run_batch.py --continue-from batch_output/2026-04-28_223640/
+
+# Limit to N rooms per scene (HM3D); useful for quick iteration
+python scripts/run_batch.py --num-rooms 2
+
+# Withhold HM3D ground-truth body names from the VLM prompt
+python scripts/run_batch.py --no-prior-labels
+
+# Other useful flags
+#   --extract-only       skip refine + persist
+#   --refine-only        re-run refine (requires prior extract state)
+#   --skip-vlm           reparse cached VLM responses
+#   --render-only        only render images, no VLM
+#   --group-size N       objects per VLM group (default 8)
+#   --dry-run            show planned commands without executing
 ```
 
-**Refine annotations** by resolving constructor field dependencies and instantiating semantic annotations:
+Each run creates a timestamped directory `batch_output/<YYYY-MM-DD_HHMMSS>/` containing `experiment_metadata.json` (commit hashes, model IDs, args), `batch_state.json` (resume state), and per-scene subdirectories with `taxonomy_export/`, per-room images, `vlm_summary.json`, `pending_annotations.json`, and `instantiation_results.json`.
+
+### Resetting the taxonomy between experiments
+
+`refine_class_structure.py` modifies the SDK's `generated_classes.py` and ORM. Reset both to a clean baseline before a fresh run:
 
 ```bash
-python scripts/refine_class_structure.py <summary.json> <world_database_id>
+./scripts/reset_taxonomy.sh
+# or, equivalently:
+python scripts/reset_class_taxonomy.py --simple
+python ../cognitive_robot_abstract_machine/semantic_digital_twin/scripts/generate_orm.py
 ```
 
-**Inspect and render** a persisted world:
+`run_batch.py` invokes the reset automatically at the start of each new (non-resumed) run.
+
+### Manual single-scene flow
+
+The same three stages can be run by hand. Use this when iterating on a single scene or debugging a stage in isolation.
 
 ```bash
-python scripts/load_and_render_scene.py <world_name>
-python scripts/utils/inspect_camera_pose.py <obj_dir>
+# 1. Extract — renders, VLM, writes a bare world to the DB
+python scripts/extract_class_structure.py \
+    datasets/matterport3d/hm3d-minival-semantic-annots-v0.2/00800-TEEsavR23oF \
+    out/vlm_summary.json \
+    --dataset hm3d \
+    --output-dir out/ \
+    --export-dir out/taxonomy_export
+
+# 2. Refine — class inference, dependency resolution, in-memory instantiation.
+#    Writes pending_annotations.json. Does NOT regenerate the ORM by itself.
+python scripts/refine_class_structure.py \
+    out/vlm_summary.json <world_db_id> \
+    --dataset hm3d --skip-persist
+
+# 3. Persist — regenerate the ORM once, then write annotations back to the DB.
+python scripts/persist_annotations.py \
+    --world-db-id <world_db_id> \
+    --dataset hm3d \
+    out/pending_annotations.json
 ```
 
-### Evaluation & Paper Figures
+When a scene has been split into rooms, `persist_annotations.py` accepts multiple `pending_annotations.json` files plus a `--room-db-ids room_db_ids.json` mapping so the ORM regeneration runs only once across the entire scene.
 
-Scripts in `scripts/paper_graphics/` for qualitative evaluation of pipeline results.
-
-**Compare ground truth vs predicted labels** (`compare_gt_vs_predicted.py`): Cross-references HM3D ground truth labels with VLM predictions from the batch output. Prints a color-coded terminal table with per-object accuracy, predicted superclasses, and a mismatch summary.
+### Inspecting persisted worlds
 
 ```bash
-# Full comparison for scene 00800
+python scripts/load_and_render_scene.py                 # list worlds in the DB
+python scripts/load_and_render_scene.py <world_name>    # render a persisted world
+python scripts/utils/inspect_camera_pose.py <obj_dir>   # interactive camera pose tuning
+```
+
+### Evaluation & paper figures
+
+Scripts in `scripts/paper_graphics/` produce evaluation tables and publication renders.
+
+**`compare_gt_vs_predicted.py`** — exact-match comparison of HM3D ground-truth labels against VLM predictions read from the batch output JSON. Prints a color-coded per-object table.
+
+```bash
 python scripts/paper_graphics/compare_gt_vs_predicted.py \
-    batch_output/00800 \
-    datasets/matterport3d/hm3d-minival-semantic-annots-v0.2/00800-TEEsavR23oF
-
-# Specific rooms, export to CSV
-python scripts/paper_graphics/compare_gt_vs_predicted.py \
-    batch_output/00800 \
+    batch_output/<run>/00800 \
     datasets/matterport3d/hm3d-minival-semantic-annots-v0.2/00800-TEEsavR23oF \
     --rooms 1 2 --csv comparison.csv
 ```
 
-**Render annotated scene** (`render_annotated_scene.py`): Renders the scene from four viewpoints with objects colored by their predicted semantic class. Generates standalone legend images. Designed for publication-quality figures.
+**`compare_gt_vs_predicted_semantic.py`** — embedding-based comparison. Loads predicted classes from the DB (post-persist), normalizes them to the GT vocabulary using `all-MiniLM-L6-v2` cosine similarity, and reports Precision / Recall / F1 / per-class IoU / mIoU.
 
 ```bash
-# Render with predicted coloring + ground truth side-by-side
-python scripts/paper_graphics/render_annotated_scene.py \
-    batch_output/00800 \
-    datasets/matterport3d/hm3d-minival-semantic-annots-v0.2/00800-TEEsavR23oF \
-    --headless --output-dir batch_output/00800/paper_renders \
-    --show-gt --render-gt
+python scripts/paper_graphics/compare_gt_vs_predicted_semantic.py \
+    --batch-dir batch_output/<run>/00802 \
+    --scene-dir datasets/matterport3d/hm3d-minival-semantic-annots-v0.2/00802-wcojb4TFT35 \
+    --threshold 0.6 --csv results.csv
 
-# Custom resolution for paper
+# or by DB ID
+python scripts/paper_graphics/compare_gt_vs_predicted_semantic.py \
+    --world-db-id 46 47 48 \
+    --scene-dir datasets/matterport3d/hm3d-minival-semantic-annots-v0.2/00802-wcojb4TFT35
+```
+
+**`render_annotated_scene.py`** — renders a scene from four viewpoints, with objects colored by predicted class, alongside ground-truth coloring. Produces standalone legend images.
+
+```bash
 python scripts/paper_graphics/render_annotated_scene.py \
-    batch_output/00800 \
+    batch_output/<run>/00800 \
     datasets/matterport3d/hm3d-minival-semantic-annots-v0.2/00800-TEEsavR23oF \
     --headless --output-dir paper_figures \
     --resolution 1920 1080 --render-gt
 ```
 
-Output per room: `original_*.png` (textured), `predicted_*.png` (class-colored), `gt_*.png` (ground truth-colored), `legend_predicted.png`, `legend_gt.png`.
+**`render_semantic_segmentation.py`** — loads a persisted world and renders it with each object painted in a distinct color (segmentation-style figure).
+
+```bash
+python scripts/paper_graphics/render_semantic_segmentation.py            # list worlds
+python scripts/paper_graphics/render_semantic_segmentation.py --id <db_id> --save out.png
+```
+
+**`render_exploded_view.py`** — same input, but each body is offset radially from the world's geometric center to expose internal structure.
+
+```bash
+python scripts/paper_graphics/render_exploded_view.py --id <db_id> --explosion-factor 1.5 --save exploded.png
+```
