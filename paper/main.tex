@@ -71,71 +71,111 @@ The stage is organised as a three-phase pipeline.
 Classifying 3D objects directly from meshes is difficult for
 general-purpose vision--language models (VLMs), which are trained
 predominantly on 2D imagery. We therefore reduce the problem to a 2D
-visual question answering task. The scene is rendered from three fixed
-camera viewpoints (top, front-right, and front-left for Warsaw-style
-scenes; auto-computed from the scene bounding box for HM3D). Objects are
-processed in groups of $N$ (default $N{=}8$); within each group, the
-target bodies are highlighted by overriding their mesh vertex colors
-with a set of maximally distinct CSS3 colors, while the remaining scene
-geometry is rendered in its original appearance to preserve spatial
-context.
+visual question answering task. The scene is rendered from a fixed set
+of camera viewpoints: three hand-tuned poses (top, front-right,
+front-left) for Warsaw-style scenes, and four bounding-box-derived
+poses for HM3D, placed at the top corners of the scene's axis-aligned
+bounding box (front-left, front-right, back-left, back-right) each
+looking at the centroid, with the up axis auto-detected as the
+smallest bounding-box extent. Objects are processed in groups of $N$
+(default $N{=}8$); within each group, the target bodies are highlighted
+by overriding their mesh vertex colors with a set of maximally
+distinct CSS3 colors, while the remaining scene geometry is rendered
+in its original appearance to preserve spatial context.
 
-The three rendered views of the group are encoded as base64 PNG payloads
-and submitted to a VLM (Qwen3-VL-30B-A3B-Instruct via OpenRouter) together
-with: (i) a JSON schema listing the highlight color assigned to each
-object, (ii) the closest CSS3 color name for disambiguation, and (iii)
-the flattened list of available ontology labels from the taxonomy
-export. The VLM is asked to return, for each highlighted object, a
-predicted class label, a confidence score, and a short free-text
-justification. Grouping objects reduces the number of VLM calls by an
-order of magnitude relative to per-object querying while still allowing
-the model to reason about each object in the context of its neighbours.
+The highlighted views of the group, paired with copies of the same
+viewpoints rendered without highlighting, are encoded as base64 PNG
+payloads and submitted to a VLM (Qwen3-VL-30B-A3B-Instruct via
+OpenRouter) together with: (i) the flattened list of available
+ontology labels from the taxonomy export, (ii) the highlight color
+assigned to each object together with its closest CSS3 color name for
+disambiguation, and (iii) optionally a per-object \emph{prior label}
+inherited from the upstream segmentation. The VLM is asked to return,
+for each highlighted object, either a class drawn directly from the
+supplied taxonomy or a proposed new class together with its parent and
+a short free-text justification, plus a confidence score in $[0, 1]$.
+Grouping objects reduces the number of VLM calls by an order of
+magnitude relative to per-object querying while still allowing the
+model to reason about each object in the context of its neighbours.
+The bare \texttt{World} -- geometry plus the raw per-object VLM
+response -- is serialised to PostgreSQL via ORMatic at the end of this
+phase, giving the subsequent phases a stable handle to re-attach to
+without re-rendering or re-querying.
 
-\subsection{Phase 2: Taxonomy-Aligned Label Refinement}
+\subsection{Phase 2: Annotation Inference and Dependency Resolution}
 \label{sec:refine}
 
-Raw VLM labels are lexically noisy: they may be synonyms of taxonomy
-entries (\emph{fridge} vs.\ \emph{refrigerator}), morphological
-variants (\emph{washer dryer} vs.\ \emph{washer-dryer}), or novel labels
-that need to be introduced into the taxonomy. We resolve this in a
-refinement step that uses sentence-level word embeddings to compute the
-cosine similarity between each predicted label and every available
-taxonomy class. Matches above an acceptance threshold are folded onto
-the canonical class (e.g., \emph{fridge}~$\to$~\emph{refrigerator},
-similarity 0.96); below-threshold predictions are preserved as candidate
-new taxonomy entries for downstream review.
+Phase~1 yields a class label per object, but instantiating that object
+as a typed entity in the ontology requires more than a name:
+\texttt{SemanticAnnotation} subclasses can have constructor arguments
+that themselves reference other annotations. For example,
+instantiating a \texttt{Handle} requires a parent
+\texttt{PrismaticConnection}; instantiating a \texttt{Drawer} requires
+a \texttt{Cabinet} container. Phase~2 turns the per-object VLM output
+into a fully instantiated, in-memory annotation graph in three
+internal steps.
 
-\subsection{Phase 3: Dependency Resolution and Persistence}
+\paragraph{Class inference.} Each predicted label is filtered against
+a minimum-confidence threshold (default $0.9$) and resolved against
+the taxonomy. Existing classes are looked up by name; novel classes
+proposed by the VLM (\texttt{is\_new\_class{=}true}) are appended to a
+generated-classes module under the parent class chosen by the VLM, so
+that they become first-class members of the ontology for the remainder
+of the run.
+
+\paragraph{Dependency resolution.} For each pending annotation we walk
+its constructor signature; for every unbound argument of annotation
+type we recursively instantiate or match an existing annotation. Slots
+that can be filled by geometric heuristics (parent-body lookups,
+kinematic-tree traversals) are resolved without external calls; the
+remaining slots are delegated to a lightweight LLM
+(Llama-3.3-70B-Instruct via OpenRouter), which is presented with a
+shortlist of candidate annotations and asked to pick the most
+appropriate one. The procedure iterates until either every dependency
+is satisfied or a fixed iteration budget is exhausted.
+
+\paragraph{Instantiation.} The resulting annotation graph is
+topologically sorted and instantiated in dependency order. The
+in-memory annotations together with any newly-introduced classes are
+buffered to a per-room JSON file of pending annotations, consumed by
+Phase~3.
+
+\subsection{Phase 3: Persistence}
 \label{sec:persist}
 
-Many classes in the target ontology are not leaf concepts but structured
-annotations whose constructors reference other annotations. For example,
-instantiating a \texttt{Handle} requires a parent
-\texttt{PrismaticConnection}; instantiating a \texttt{Drawer} requires a
-\texttt{Cabinet} container. A naive instantiation order fails whenever a
-required neighbour has not yet been created.
+Phase~2 leaves three artefacts: the bare \texttt{World} from Phase~1
+in PostgreSQL, an extended generated-classes Python module containing
+any new classes the VLM proposed, and one JSON file per room of
+pending annotations on disk. Phase~3 reconciles these and writes the
+finished SemDT back to the database.
 
-We address this with a three-step procedure. First, for each segmented
-body we use the refined label from Phase~2 to look up the most specific
-compatible \texttt{SemanticAnnotation} subclass in the taxonomy. Second,
-we traverse the constructor signature of that class and, for each
-unresolved argument, recursively instantiate or match an existing
-annotation of the required type, calling a lightweight LLM
-(Llama-3.3-70B-Instruct) only where the dependency cannot be satisfied
-by geometric heuristics. Third, the resulting annotation graph is
-topologically sorted and instantiated in dependency order, yielding a
-valid \texttt{World} object. The world is persisted to PostgreSQL via
-ORMatic so that it can be reloaded, rendered, and queried by downstream
-reasoning components without re-running the VLM.
+The ORMatic object--relational mapping is regenerated exactly
+\emph{once per scene}, picking up every new class introduced across
+all of the scene's rooms in a single pass; this keeps the cost of ORM
+regeneration -- the dominant per-step cost in an earlier monolithic
+implementation -- amortised over the entire scene rather than paid per
+room. The \texttt{World} is then reloaded from PostgreSQL, the
+per-room pending-annotation files are deserialised and re-instantiated
+against the up-to-date class hierarchy, and the augmented
+\texttt{World} is written back to the database via ORMatic. The output
+is a queryable knowledge base in which every segmented body is
+reachable through a typed \texttt{SemanticAnnotation} instance and
+constructor-level dependencies between annotations are captured as
+foreign-key relations on the relational side, so that the SemDT can be
+reloaded, rendered, and queried by downstream reasoning components
+without re-running the VLM or the LLM.
 
 \subsection{Batch Execution}
 
 The three phases are driven by a batch runner that iterates over all
-rooms of a scene, caches VLM responses for reproducibility, records the
-per-run taxonomy snapshot, and logs git commit hashes and model
-identifiers into an experiment metadata file. This makes runs
-reproducible across taxonomy evolutions: the same segmented mesh
-re-processed against a later taxonomy yields a controlled set of
+rooms of a scene, caches VLM responses for reproducibility, records
+the per-run taxonomy snapshot, and logs git commit hashes and model
+identifiers into an experiment metadata file. Stage transitions are
+checkpointed at the per-scene and per-room level, so a failure in
+Phase~3 (for example, an ORM regeneration error) can be resumed
+without re-running the VLM or the dependency-resolution LLM. This
+makes runs reproducible across taxonomy evolutions: the same segmented
+mesh re-processed against a later taxonomy yields a controlled set of
 label changes attributable to the taxonomy rather than to VLM
 non-determinism.
 
@@ -158,16 +198,24 @@ split that cover a mix of residential floor plans and room counts:
 \texttt{00802}, \texttt{00803}, and \texttt{00808}.
 
 \paragraph{Protocol.}
-For every segmented object, the pipeline produces a predicted label
-which is aligned to the HM3D GT label vocabulary via the
-embedding-based refinement of Section~\ref{sec:refine}. We report:
-\emph{precision} and \emph{recall} of predicted labels against GT
-labels; their harmonic mean (\emph{F1}); and a \emph{mean IoU}
-(\emph{mIoU}) computed per class as the intersection-over-union of the
-sets of objects assigned to that class in GT vs.\ prediction,
-macro-averaged across classes present in either set. True positives,
-false positives, and false negatives are counted at the
-(room, object) level.
+For every segmented object, the pipeline (Section~\ref{sec:refine})
+produces a predicted class label drawn from our internal ontology,
+whose vocabulary does not coincide with the HM3D GT labels: the target
+ontology is intentionally richer, introducing structural sub-classes
+(e.g., \texttt{Cabinet}/\texttt{Drawer}/\texttt{Handle}) that HM3D's
+flat label list does not distinguish. To enable comparison, we align
+predictions to the GT vocabulary \emph{at evaluation time} -- not in
+the pipeline -- by embedding both label sets with a sentence-transformer
+(\texttt{all-MiniLM-L6-v2}) and assigning each prediction to the
+nearest GT label whose cosine similarity exceeds a threshold $\tau$
+(default $\tau{=}0.6$); below-threshold predictions count as false
+negatives. We report: \emph{precision} and \emph{recall} of predicted
+labels against GT labels; their harmonic mean (\emph{F1}); and a
+\emph{mean IoU} (\emph{mIoU}) computed per class as the
+intersection-over-union of the sets of objects assigned to that class
+in GT vs.\ prediction, macro-averaged across classes present in either
+set. True positives, false positives, and false negatives are counted
+at the (room, object) level.
 
 \paragraph{Results.}
 Table~\ref{tab:hm3d} summarises the per-scene metrics. Across the three
@@ -201,15 +249,16 @@ Scene & Precision & Recall & F1 & mIoU & TP / FP / FN \\
 
 \paragraph{Error analysis.}
 Inspecting the per-class IoU breakdown on scene~\texttt{00808} reveals
-three dominant failure modes. (i)~\emph{Taxonomy-level synonymy not
-captured by embeddings}: labels such as \emph{poster} are matched
-against \emph{picture} with similarity~$0.52$, below our acceptance
-threshold, so they become false negatives on GT classes for which the
-taxonomy does in fact carry a suitable class. (ii)~\emph{Visual
+three dominant failure modes. (i)~\emph{Taxonomy--GT synonymy not
+captured by the eval-time embedding alignment}: labels such as
+\emph{poster} are matched against the closest GT term \emph{picture}
+with similarity~$0.52$, below the alignment threshold $\tau$, so they
+become false negatives on GT classes for which the pipeline did
+produce a semantically appropriate prediction. (ii)~\emph{Visual
 confusions on thin or occluded geometry}: the model confuses
 \emph{cloth} with \emph{towel} (sim.~$0.66$) and \emph{handle} with
-\emph{broom} when only a fragment of the object is visible in all three
-views. (iii)~\emph{Fine-grained container classes}: \emph{kitchen
+\emph{broom} when only a fragment of the object is visible across
+viewpoints. (iii)~\emph{Fine-grained container classes}: \emph{kitchen
 cabinet} is correctly retrieved only for $3.8\%$ of GT instances, most
 cabinets being labelled with the coarser \emph{cabinet} (IoU~$0.12$).
 Conversely, common and visually distinctive categories
@@ -227,8 +276,10 @@ and we report them here only for historical context.
 
 \subsection{Ablations}
 \label{sec:ablations}
-TODO: report effect of number of camera viewpoints, group size $N$,
-embedding acceptance threshold, and with/without prior-label conditioning.
+TODO: report effect of (i) number of camera viewpoints (4 vs.\ 3
+vs.\ 2), (ii) group size $N$, (iii) the Phase-2 minimum-confidence
+threshold, (iv) with/without prior-label conditioning, and (v) the
+eval-time alignment threshold $\tau$.
 
 \subsection{Real-World Scenes: End-to-End Evaluation}
 \label{sec:eval_real}
