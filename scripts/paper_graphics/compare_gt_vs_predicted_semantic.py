@@ -49,10 +49,13 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
+import requests
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
+DEFAULT_LLM_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from krrood.ormatic.utils import create_engine
@@ -334,6 +337,135 @@ def normalize_labels(
 
 
 # ---------------------------------------------------------------------------
+# LLM-based label normalization (OpenRouter)
+# ---------------------------------------------------------------------------
+
+def _query_llm_for_matches(
+    pred_labels: list[str],
+    gt_labels: list[str],
+    model: str,
+) -> dict[str, str | None]:
+    """Ask an OpenRouter LLM to map each predicted label to a GT vocabulary
+    entry, or to null if no acceptable match exists.
+
+    Returns ``{predicted_label: gt_label or None}``.
+    """
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "OPENROUTER_API_KEY environment variable is not set."
+        )
+
+    prompt = (
+        "You are matching predicted scene-object labels to a fixed "
+        "ground-truth vocabulary.\n\n"
+        f"Ground-truth vocabulary (allowed targets):\n"
+        f"{json.dumps(sorted(gt_labels))}\n\n"
+        f"Predicted labels to match:\n{json.dumps(pred_labels)}\n\n"
+        "For each predicted label, choose the single best matching "
+        "ground-truth label from the vocabulary above, or null if no "
+        "acceptable match exists. Two labels match if they refer to the "
+        "same kind of physical object (e.g. \"shelving unit\" -> \"shelf\","
+        " \"trash bin\" -> \"trashcan\", \"houseplant\" -> \"plant\"). "
+        "Do not invent new vocabulary entries.\n\n"
+        "Respond with a single JSON object mapping every predicted label "
+        "to either a vocabulary string or null. No prose, no code fences. "
+        "Example: {\"shelving unit\": \"shelf\", \"obscure thing\": null}"
+    )
+
+    response = requests.post(
+        url="https://openrouter.ai/api/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "ai.uni-bremen.de",
+            "X-Title": "Uni Bremen",
+        },
+        data=json.dumps({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a label normalization assistant. "
+                               "Respond only with a valid JSON object.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+        }),
+    )
+    result = response.json()
+    if "choices" not in result:
+        raise RuntimeError(f"Unexpected OpenRouter response: {result}")
+    content = result["choices"][0]["message"]["content"]
+    content = content.replace("```json", "").replace("```", "").strip()
+    parsed = json.loads(content)
+    if not isinstance(parsed, dict):
+        raise RuntimeError(
+            f"LLM returned non-dict JSON: {parsed!r}"
+        )
+    return parsed
+
+
+def normalize_labels_llm(
+    predicted: list[str],
+    ground_truth: list[str],
+    model: str = DEFAULT_LLM_MODEL,
+) -> tuple[list[str], list[str], list[dict]]:
+    """LLM-driven counterpart to :func:`normalize_labels`.
+
+    Sends all unique predicted labels (that aren't already in the GT
+    vocabulary) to ``model`` via OpenRouter in a single request and asks
+    it to map each to a GT label or null. Returns the same
+    ``(normalized_predicted, ground_truth, normalization_log)`` shape as
+    the embedding-based normalizer; ``similarity`` is 1.0 for accepted
+    matches and 0.0 for rejected ones.
+    """
+    gt_unique = list(set(ground_truth))
+    pred_unique = sorted({p for p in predicted if p not in gt_unique})
+    print(f"  {len(predicted)} predicted labels, {len(gt_unique)} unique GT "
+          f"labels, {len(pred_unique)} predicted labels need matching")
+
+    matches: dict[str, str | None] = {}
+    if pred_unique:
+        print(f"  Querying {model} for matches...")
+        matches = _query_llm_for_matches(pred_unique, gt_unique, model)
+
+    normalized = []
+    log = []
+    n_exact = 0
+    n_accepted = 0
+    n_rejected = 0
+
+    for p in predicted:
+        if p in gt_unique:
+            normalized.append(p)
+            n_exact += 1
+            continue
+
+        match = matches.get(p)
+        accepted = isinstance(match, str) and match in gt_unique
+
+        log.append({
+            "original": p,
+            "matched_to": match if accepted else (match or ""),
+            "similarity": 1.0 if accepted else 0.0,
+            "accepted": accepted,
+        })
+
+        if accepted:
+            normalized.append(match)
+            n_accepted += 1
+        else:
+            normalized.append(p)
+            n_rejected += 1
+
+    print(f"  Normalization done: {n_exact} exact, {n_accepted} matched, "
+          f"{n_rejected} unmatched")
+
+    return normalized, ground_truth, log
+
+
+# ---------------------------------------------------------------------------
 # Bag-of-labels evaluation metrics
 # ---------------------------------------------------------------------------
 
@@ -543,6 +675,18 @@ def main():
         help="Cosine similarity threshold for label normalization (default: 0.55).",
     )
     parser.add_argument(
+        "--matcher", choices=("embedding", "llm", "both"), default="both",
+        help="Label normalization strategy: 'embedding' "
+             "(sentence-transformer cosine similarity), 'llm' (query an "
+             "OpenRouter chat model; requires OPENROUTER_API_KEY), or "
+             "'both' (default; runs each and prints side-by-side results).",
+    )
+    parser.add_argument(
+        "--llm-model", default=DEFAULT_LLM_MODEL,
+        help=f"OpenRouter model id used when --matcher=llm "
+             f"(default: {DEFAULT_LLM_MODEL}).",
+    )
+    parser.add_argument(
         "--csv", type=Path, default=None,
         help="Save results to a CSV file.",
     )
@@ -572,17 +716,33 @@ def main():
     print(f"Loading ground truth from {args.scene_dir}...")
     ground_truth = load_ground_truth_labels(args.scene_dir)
 
-    print(f"Normalizing labels (threshold={args.threshold})...")
-    predicted_norm, gt_norm, norm_log = normalize_labels(
-        predicted, ground_truth, threshold=args.threshold,
-    )
+    matchers = (["embedding", "llm"]
+                if args.matcher == "both" else [args.matcher])
 
-    metrics = evaluate(predicted_norm, gt_norm)
+    for m in matchers:
+        if args.matcher == "both":
+            banner = "#" * 50
+            print(f"\n{banner}\n# MATCHER: {m.upper()}\n{banner}")
 
-    print_results(metrics, norm_log, predicted_norm, gt_norm)
+        if m == "llm":
+            print(f"Normalizing labels via LLM ({args.llm_model})...")
+            predicted_norm, gt_norm, norm_log = normalize_labels_llm(
+                predicted, ground_truth, model=args.llm_model,
+            )
+        else:
+            print(f"Normalizing labels (threshold={args.threshold})...")
+            predicted_norm, gt_norm, norm_log = normalize_labels(
+                predicted, ground_truth, threshold=args.threshold,
+            )
 
-    if args.csv:
-        save_csv(metrics, norm_log, args.csv)
+        metrics = evaluate(predicted_norm, gt_norm)
+        print_results(metrics, norm_log, predicted_norm, gt_norm)
+
+        if args.csv:
+            csv_path = (args.csv.with_name(
+                f"{args.csv.stem}_{m}{args.csv.suffix}")
+                if args.matcher == "both" else args.csv)
+            save_csv(metrics, norm_log, csv_path)
 
 
 if __name__ == "__main__":
