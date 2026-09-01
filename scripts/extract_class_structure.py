@@ -2,75 +2,25 @@ import argparse
 import base64
 import json
 import os
-# Import shared functions from load_warsaw_scene
-import sys
 import time
 from pathlib import Path
 from typing import Dict, List
 
-import numpy as np
 import requests
 
 from krrood.ormatic.data_access_objects.helper import to_dao
-from krrood.ormatic.utils import create_engine
-from semantic_digital_twin.adapters.warsaw_world_loader import WarsawWorldLoader
+from experiments.warsaw.world_loader import WarsawWorldLoader
 from semantic_digital_twin.orm.ormatic_interface import Base, WorldMappingDAO
-from semantic_digital_twin.spatial_types import HomogeneousTransformationMatrix
+from semantic_digital_twin.orm.utils import semantic_digital_twin_sessionmaker
 from sqlalchemy.orm import Session
 
-sys.path.insert(
-    0, str(Path(__file__).parent.parent / "semantic_digital_twin" / "scripts")
-)
 from semdt_2d_video.hm3d_world_loader import HM3DWorldLoader
-
-DB_NAME = os.getenv("PGDATABASE")
-DB_USER = os.getenv("PGUSER")
-DB_PASSWORD = os.getenv("PGPASSWORD")
-
-DB_HOST = "localhost"
-DB_PORT = os.getenv("PGPORT", 5432)
-
-connection_string = (
-    f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-)
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 
 def encode_image_bytes(image_bytes: bytes) -> str:
     return base64.b64encode(image_bytes).decode("utf-8")
-
-
-def create_camera_poses() -> Dict[str, np.ndarray]:
-    """
-    Create camera transforms
-    """
-    return {
-        "top": np.array(
-            [
-                [0.019661, 0.565278, -0.824666, -3.302801],
-                [-0.999801, 0.008306, -0.018143, -0.113984],
-                [-0.003406, 0.824859, 0.565329, 2.521490],
-                [0.000000, 0.000000, 0.000000, 1.000000],
-            ]
-        ),
-        "front_right": np.array(
-            [
-                [0.493480, -0.501933, 0.710310, 2.967743],
-                [0.863728, 0.378807, -0.332385, -1.558169],
-                [-0.102235, 0.777540, 0.620467, 2.430472],
-                [0.000000, 0.000000, 0.000000, 1.000000],
-            ]
-        ),
-        "front_left": np.array(
-            [
-                [-0.658764, -0.383959, 0.646997, 2.903789],
-                [0.752266, -0.323319, 0.574074, 3.060092],
-                [-0.011235, 0.864893, 0.501830, 2.281899],
-                [0.000000, 0.000000, 0.000000, 1.000000],
-            ]
-        ),
-    }
 
 
 def query_vlm(
@@ -284,7 +234,7 @@ def main(args):
     base_output_dir.mkdir(parents=True, exist_ok=True)
 
     # Create database engine and tables for later persistence of the world
-    engine = create_engine(connection_string, echo=True)  # echo=True for debugging SQL
+    engine = semantic_digital_twin_sessionmaker()().bind
     Base.metadata.create_all(bind=engine)
     print("Database tables created")
 
@@ -339,7 +289,7 @@ def main(args):
         world_loader = WarsawWorldLoader(obj_dir)
         world = world_loader.world
         bodies = world.bodies_with_collision
-        camera_poses_dict = create_camera_poses()
+        camera_poses_dict = world_loader.compute_camera_poses()
         room_batches = [(None, bodies, camera_poses_dict, world_loader)]
 
     # Export semantic annotations JSON for VLM context
@@ -374,7 +324,8 @@ def main(args):
                 image_bytes = batch_loader.render_scene_from_camera_pose(
                     camera_pose,
                     image_dir / f"scene_orig_{pose_name}.png",
-                    headless=args.headless, use_visual_mesh=True,
+                    headless=args.headless,
+                    **({"use_visual_mesh": True} if args.dataset == "hm3d" else {}),
                 )
                 original_images.append(image_bytes)
 
@@ -490,7 +441,8 @@ def main(args):
                 batch_loader.render_scene_from_camera_pose(
                     camera_pose,
                     image_dir / f"scene_orig_{pose_name}.png",
-                    headless=args.headless, use_visual_mesh=True,
+                    headless=args.headless,
+                    **({"use_visual_mesh": True} if args.dataset == "hm3d" else {}),
                 )
 
             # Process groups

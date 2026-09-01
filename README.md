@@ -34,7 +34,9 @@ GRANT ALL PRIVILEGES ON DATABASE semdt_db TO semdt;
 psql -h localhost -U semdt -d semdt_db -c "SELECT 1;"
 ```
 
-The scripts read connection details from environment variables (see step 4 below). The defaults used throughout the project are `PGDATABASE=semdt_db`, `PGUSER=semdt`, `PGPASSWORD=semdt` on `localhost:5432`.
+The scripts reach the database through `semantic_digital_twin`'s own session maker, which reads a single connection URI from `SEMANTIC_DIGITAL_TWIN_DATABASE_URI` (see step 4 below).
+
+**Note:** the URI must name the driver as `postgresql+psycopg://`. A bare `postgresql://` selects psycopg2, which this workspace does not install.
 
 ### 2. Install the CRAM dependency
 
@@ -65,10 +67,7 @@ pip install -e .
 The scripts require database credentials and an API key:
 
 ```bash
-export PGDATABASE=<your_database>
-export PGUSER=<your_user>
-export PGPASSWORD=<your_password>
-export PGPORT=<postgres_port>
+export SEMANTIC_DIGITAL_TWIN_DATABASE_URI=postgresql+psycopg://<user>:<password>@localhost:5432/<database>
 export OPENROUTER_API_KEY=<your_key>  # for VLM queries
 ```
 

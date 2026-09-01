@@ -19,29 +19,13 @@ import numpy as np
 import trimesh
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from krrood.ormatic.utils import create_engine
+from semantic_digital_twin.orm.exceptions import DatabaseNotAvailableError
+from semantic_digital_twin.orm.utils import semantic_digital_twin_sessionmaker
 
-from semantic_digital_twin.adapters.warsaw_world_loader import WarsawWorldLoader
+from experiments.warsaw.world_loader import WarsawWorldLoader
 from semantic_digital_twin.orm.ormatic_interface import WorldMappingDAO
 from semantic_digital_twin.spatial_computations.raytracer import RayTracer
 from semantic_digital_twin.world import World
-
-# Database connection settings from environment
-DB_NAME = os.getenv("PGDATABASE")
-DB_USER = os.getenv("PGUSER")
-DB_PASSWORD = os.getenv("PGPASSWORD")
-DB_HOST = os.getenv("PGHOST", "localhost")
-DB_PORT = os.getenv("PGPORT", "5432")
-
-
-def get_connection_string() -> str:
-    """Build database connection string from environment variables."""
-    if not all([DB_NAME, DB_USER, DB_PASSWORD]):
-        raise EnvironmentError(
-            "Database credentials not set. Please set PGDATABASE, PGUSER, and PGPASSWORD environment variables."
-        )
-    return f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-
 
 def list_available_worlds(session: Session) -> list[tuple[str, int]]:
     """List all available world names in the database."""
@@ -125,13 +109,10 @@ def main(args):
     # Or load from database
     elif args.id is not None or args.name is not None:
         try:
-            connection_string = get_connection_string()
-        except EnvironmentError as e:
+            session = semantic_digital_twin_sessionmaker()()
+        except DatabaseNotAvailableError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
-
-        engine = create_engine(connection_string)
-        session = Session(engine)
 
         try:
             if args.id is not None:
@@ -157,20 +138,17 @@ def main(args):
     else:
         # List available worlds if loading from database
         try:
-            connection_string = get_connection_string()
-        except EnvironmentError:
+            session = semantic_digital_twin_sessionmaker()()
+        except DatabaseNotAvailableError:
             print(
                 "Error: No world specified. Provide --obj-dir, --id, or --name.",
                 file=sys.stderr,
             )
             print(
-                "For database access, set PGDATABASE, PGUSER, and PGPASSWORD.",
+                "For database access, set SEMANTIC_DIGITAL_TWIN_DATABASE_URI.",
                 file=sys.stderr,
             )
             sys.exit(1)
-
-        engine = create_engine(connection_string)
-        session = Session(engine)
 
         try:
             print("Available worlds in database:")

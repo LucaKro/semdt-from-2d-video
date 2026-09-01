@@ -241,18 +241,8 @@ from semantic_digital_twin.semantic_annotations import semantic_annotations as s
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from krrood.ormatic.utils import create_engine
 from krrood.ormatic.data_access_objects.helper import to_dao
-
-DB_NAME = os.getenv("PGDATABASE")
-DB_USER = os.getenv("PGUSER")
-DB_PASSWORD = os.getenv("PGPASSWORD")
-DB_HOST = "localhost"
-DB_PORT = os.getenv("PGPORT", 5432)
-
-connection_string = (
-    f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-)
+from semantic_digital_twin.orm.utils import semantic_digital_twin_sessionmaker
 
 
 def build_class_lookup():
@@ -478,7 +468,7 @@ def main():
     logging.info("Class lookup has %d classes", len(class_lookup))
 
     # Connect to database
-    engine = create_engine(connection_string, echo=False)
+    engine = semantic_digital_twin_sessionmaker()().bind
 
     # Drop only generated DAO tables whose inheritance may have changed
     # between scenes (the VLM can pick different superclasses each time).

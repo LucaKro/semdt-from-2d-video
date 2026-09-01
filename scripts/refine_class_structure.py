@@ -29,7 +29,7 @@ from krrood.ormatic.data_access_objects import alternative_mappings
 from krrood.ormatic.ormatic import ORMatic
 import requests
 
-from semantic_digital_twin.adapters.warsaw_world_loader import WarsawWorldLoader
+from experiments.warsaw.world_loader import WarsawWorldLoader
 from semantic_digital_twin.semantic_annotations import semantic_annotations as sa_module
 from semantic_digital_twin.semantic_annotations.mixins import HasRootKinematicStructureEntity
 from semantic_digital_twin.world import World
@@ -82,19 +82,8 @@ from semantic_digital_twin.orm.ormatic_interface import WorldMappingDAO, Base
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from krrood.ormatic.helper import get_classes_of_ormatic_interface
-from krrood.ormatic.utils import create_engine
 from krrood.ormatic.data_access_objects.helper import to_dao
-
-DB_NAME = os.getenv("PGDATABASE")
-DB_USER = os.getenv("PGUSER")
-DB_PASSWORD = os.getenv("PGPASSWORD")
-
-DB_HOST = "localhost"
-DB_PORT = os.getenv("PGPORT", 5432)
-
-connection_string = (
-    f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-)
+from semantic_digital_twin.orm.utils import semantic_digital_twin_sessionmaker
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
@@ -808,7 +797,7 @@ def main(args):
 
     # Load world from database
     logging.info("Loading world from database...")
-    engine = create_engine(connection_string, echo=False)
+    engine = semantic_digital_twin_sessionmaker()().bind
     Base.metadata.create_all(bind=engine)
     with Session(engine) as session:
         queried_dao = session.scalar(

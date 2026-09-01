@@ -16,7 +16,12 @@ dependencies = [
     "pyrender",
     "PyOpenGL-accelerate",
     "scikit-learn",
-    "sentence-transformers"
+    "sentence-transformers",
+    # From the cognitive_robot_abstract_machine workspace, installed from a checkout
+    # beside this one.
+    "krrood",
+    "semantic_digital_twin",
+    "experiments",
 ]
 
 [project.optional-dependencies]

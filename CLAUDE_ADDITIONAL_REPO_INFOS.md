@@ -36,7 +36,7 @@ Bodies are obtained differently:
 
 ## External Dependencies
 
-This project depends on the `cognitive_robot_abstract_machine` monorepo at `/home/ben/devel/iai/src/cognitive_robot_abstract_machine/`, which is a **Poetry** workspace (`package-mode = false`) that installs subprojects as path dependencies:
+This project depends on the `cognitive_robot_abstract_machine` monorepo, which the scripts resolve as the sibling directory `../cognitive_robot_abstract_machine/`. It is a **Poetry** workspace (`package-mode = false`) that installs subprojects as path dependencies:
 - `semantic_digital_twin` - core world/scene representation, WarsawWorldLoader, Color, Mesh, RayTracer
 - `krrood` - ORM (ORMatic), class diagram tools, InheritanceStructureExporter
 - `pycram-robotics`, `giskardpy`
@@ -48,7 +48,9 @@ Key SDK types used: `World`, `Body`, `PrefixedName`, `Color` (has `.distinct_col
 ## Environment Variables
 
 - `OPENROUTER_API_KEY` - required for VLM queries
-- `PGDATABASE`, `PGUSER`, `PGPASSWORD` - PostgreSQL connection (host: localhost, port: 5432)
+- `SEMANTIC_DIGITAL_TWIN_DATABASE_URI` - PostgreSQL connection URI, read by
+  `semantic_digital_twin.orm.utils.semantic_digital_twin_sessionmaker`. Must use the
+  `postgresql+psycopg://` scheme, since only psycopg 3 is installed.
 
 ## Running
 

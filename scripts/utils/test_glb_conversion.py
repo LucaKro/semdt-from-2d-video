@@ -1,8 +1,11 @@
-import trimesh
 import os
+from pathlib import Path
 
-# Path to the GLB directory
-glb_base_dir = '/home/ben/Downloads/hm3d-minival-v0.2.zip/hm3d-minival-glb-v0.2/'
+import trimesh
+
+# Path to the GLB directory, relative to the repository this script lives in.
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+glb_base_dir = REPO_ROOT / "datasets" / "matterport3d" / "hm3d-minival-glb-v0.2"
 
 # Get the first available GLB file
 scene_dirs = sorted(os.listdir(glb_base_dir))

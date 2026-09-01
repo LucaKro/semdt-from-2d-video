@@ -53,12 +53,11 @@ import requests
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from sqlalchemy import select
-from sqlalchemy.orm import Session
 
 DEFAULT_LLM_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from krrood.ormatic.utils import create_engine
+from semantic_digital_twin.orm.utils import semantic_digital_twin_sessionmaker
 from semantic_digital_twin.orm.ormatic_interface import WorldMappingDAO
 
 
@@ -95,20 +94,9 @@ def _encode_labels(labels: list[str]) -> dict[str, list[float]]:
 # Load predicted labels from PostgreSQL
 # ---------------------------------------------------------------------------
 
-def _get_engine():
-    db_name = os.getenv("PGDATABASE")
-    db_user = os.getenv("PGUSER")
-    db_password = os.getenv("PGPASSWORD")
-    db_host = os.getenv("PGHOST", "localhost")
-    db_port = os.getenv("PGPORT", "5432")
-    url = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
-    return create_engine(url)
-
-
 def load_predicted_labels_by_db_id(db_id: int) -> list[str]:
     """Load predicted semantic labels from a persisted world by database_id."""
-    engine = _get_engine()
-    session = Session(engine)
+    session = semantic_digital_twin_sessionmaker()()
     query = select(WorldMappingDAO).where(
         WorldMappingDAO.database_id == db_id
     )

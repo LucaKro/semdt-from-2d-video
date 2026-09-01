@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-source ~/devel/vibe-semdt/semdt-from-2d-video/cram-env/bin/activate
-
+# Runs in whatever Python environment invoked it, the way run_batch.py does.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CRAM_DIR="$(cd "$SCRIPT_DIR/../../cognitive_robot_abstract_machine" && pwd)"
 
