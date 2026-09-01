@@ -277,16 +277,11 @@ class HM3DWorldLoader:
                 body_name = f"{annotation.label}_{annotation.object_id}"
 
                 r, g, b = rgb
-                combined.visual.face_colors = np.array(
-                    [r, g, b, 255], dtype=np.uint8
-                )
-
-                # The face colors set above carry the annotation color, so the
-                # shape keeps its default color and the mesh's own colors survive.
                 mesh_shape = Mesh.from_trimesh(
                     mesh=combined,
                     origin=HomogeneousTransformationMatrix(),
                 )
+                mesh_shape.dye(Color(R=r / 255.0, G=g / 255.0, B=b / 255.0))
                 shape_collection = ShapeCollection([mesh_shape])
 
                 body = Body(
@@ -436,10 +431,10 @@ class HM3DWorldLoader:
     @staticmethod
     def _apply_highlight_to_group(bodies: List[Body]) -> Dict[UUID, Color]:
         """Apply distinct highlight colors to a group of bodies."""
-        colors = Color.distinct_html_colors(len(bodies))
+        colors = Color.distinct_colors(len(bodies))
         for body, color in zip(bodies, colors):
             body_mesh = body.collision[0]
-            body_mesh.override_mesh_with_color(color)
+            body_mesh.dye(color)
         return {body.id: color for body, color in zip(bodies, colors)}
 
     # Labels whose bodies should be hidden from outside-camera views so

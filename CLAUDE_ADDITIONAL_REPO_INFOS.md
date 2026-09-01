@@ -31,7 +31,7 @@ Both `WarsawWorldLoader` and `HM3DWorldLoader` expose:
 - `.export_semantic_annotation_inheritance_structure(output_directory)` - exports taxonomy JSON
 
 Bodies are obtained differently:
-- Warsaw: `world.bodies_with_enabled_collision`
+- Warsaw: `world.bodies_with_collision`
 - HM3D: `world_loader.object_bodies` (all non-root bodies; HM3D bodies lack collision configs)
 
 ## External Dependencies
@@ -43,7 +43,7 @@ This project depends on the `cognitive_robot_abstract_machine` monorepo at `/hom
 
 **Important**: `semantic_digital_twin` itself uses **setuptools** (not Poetry). Its dependencies are in `requirements.txt` and read via `dynamic = ["dependencies"]` in its `pyproject.toml`. When adding dependencies there, you must `poetry lock && poetry install` at the monorepo level to pick them up.
 
-Key SDK types used: `World`, `Body`, `PrefixedName`, `Color` (has `.distinct_html_colors()`, `.closest_css3_color_name()`), `Mesh`, `ShapeCollection`, `FixedConnection`, `TransformationMatrix`.
+Key SDK types used: `World`, `Body`, `PrefixedName`, `Color` (has `.distinct_colors()`, `.closest_css3_name()`), `Mesh`, `ShapeCollection`, `FixedConnection`, `TransformationMatrix`.
 
 ## Environment Variables
 

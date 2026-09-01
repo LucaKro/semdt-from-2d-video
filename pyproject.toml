@@ -14,7 +14,9 @@ dependencies = [
     "sqlalchemy",
     "pyglet",
     "pyrender",
-    "PyOpenGL-accelerate"
+    "PyOpenGL-accelerate",
+    "scikit-learn",
+    "sentence-transformers"
 ]
 
 [project.optional-dependencies]

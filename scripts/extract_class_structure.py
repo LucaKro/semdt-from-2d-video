@@ -338,7 +338,7 @@ def main(args):
     else:
         world_loader = WarsawWorldLoader(obj_dir)
         world = world_loader.world
-        bodies = world.bodies_with_enabled_collision
+        bodies = world.bodies_with_collision
         camera_poses_dict = create_camera_poses()
         room_batches = [(None, bodies, camera_poses_dict, world_loader)]
 
@@ -393,7 +393,7 @@ def main(args):
                     batch_loader._reset_body_colors()
                 bodies_colors = batch_loader._apply_highlight_to_group(group)
                 color_names = list(
-                    map(lambda c: c.closest_css3_color_name(), bodies_colors.values())
+                    map(lambda c: c.closest_css3_name(), bodies_colors.values())
                 )
 
                 # Render highlighted scene from 4 viewpoints
@@ -507,7 +507,7 @@ def main(args):
                     batch_loader._reset_body_colors()
                 bodies_colors = batch_loader._apply_highlight_to_group(group)
                 color_names = list(
-                    map(lambda c: c.closest_css3_color_name(), bodies_colors.values())
+                    map(lambda c: c.closest_css3_name(), bodies_colors.values())
                 )
 
                 # Render highlighted scene from 4 viewpoints
