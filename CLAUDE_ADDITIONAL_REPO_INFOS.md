@@ -37,13 +37,13 @@ Bodies are obtained differently:
 ## External Dependencies
 
 This project depends on the `cognitive_robot_abstract_machine` monorepo at `/home/ben/devel/iai/src/cognitive_robot_abstract_machine/`, which is a **Poetry** workspace (`package-mode = false`) that installs subprojects as path dependencies:
-- `semantic_digital_twin` - core world/scene representation, WarsawWorldLoader, Color, TriangleMesh, RayTracer
+- `semantic_digital_twin` - core world/scene representation, WarsawWorldLoader, Color, Mesh, RayTracer
 - `krrood` - ORM (ORMatic), class diagram tools, InheritanceStructureExporter
 - `pycram-robotics`, `giskardpy`
 
 **Important**: `semantic_digital_twin` itself uses **setuptools** (not Poetry). Its dependencies are in `requirements.txt` and read via `dynamic = ["dependencies"]` in its `pyproject.toml`. When adding dependencies there, you must `poetry lock && poetry install` at the monorepo level to pick them up.
 
-Key SDK types used: `World`, `Body`, `PrefixedName`, `Color` (has `.distinct_html_colors()`, `.closest_css3_color_name()`), `TriangleMesh` (has `.override_mesh_with_color()`), `ShapeCollection`, `FixedConnection`, `TransformationMatrix`.
+Key SDK types used: `World`, `Body`, `PrefixedName`, `Color` (has `.distinct_html_colors()`, `.closest_css3_color_name()`), `Mesh`, `ShapeCollection`, `FixedConnection`, `TransformationMatrix`.
 
 ## Environment Variables
 
@@ -65,5 +65,3 @@ python scripts/extract_class_structure.py /path/to/obj_dir output.json
 
 # Useful flags: --skip_vlm (reparse existing output), --render-only (images only), --group-size N
 ```
-
-VSCode launch configs are in `.vscode/launch.json`.

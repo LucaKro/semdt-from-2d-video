@@ -52,7 +52,6 @@ from semantic_digital_twin.semantic_annotations.in_memory_builder import (
 )
 from semantic_digital_twin.world_description.world_entity import (
     SemanticAnnotation,
-    RootedSemanticAnnotation,
     Body,
 )
 from semantic_digital_twin.semantic_annotations.mixins import (
@@ -97,7 +96,7 @@ import semantic_digital_twin.adapters.procthor.procthor_resolver
 import semantic_digital_twin.callbacks.callback
 import semantic_digital_twin.orm.model
 import semantic_digital_twin.reasoning.predicates
-import semantic_digital_twin.robots.abstract_robot
+import semantic_digital_twin.robots.robot_parts
 import semantic_digital_twin.robots.hsrb
 import semantic_digital_twin.robots.pr2
 import semantic_digital_twin.semantic_annotations.semantic_annotations
@@ -107,7 +106,7 @@ import semantic_digital_twin.world_description.geometry
 import semantic_digital_twin.world_description.shape_collection
 import semantic_digital_twin.world_description.world_entity
 
-from krrood.class_diagrams import ClassDiagram
+from krrood.class_diagrams.class_diagram import ClassDiagram
 from krrood.ormatic.ormatic import ORMatic
 from krrood.ormatic.type_dict import TypeDict
 from krrood.ormatic.utils import classes_of_module
@@ -162,7 +161,7 @@ def regenerate_orm():
     all_classes |= set(
         classes_of_module(semantic_digital_twin.world_description.degree_of_freedom)
     )
-    all_classes |= set(classes_of_module(semantic_digital_twin.robots.abstract_robot))
+    all_classes |= set(classes_of_module(semantic_digital_twin.robots.robot_parts))
     all_classes |= set(classes_of_module(semantic_digital_twin.datastructures.definitions))
     all_classes |= set(classes_of_module(semantic_digital_twin.robots.hsrb))
     all_classes |= set(classes_of_module(semantic_digital_twin.robots.pr2))
@@ -243,7 +242,7 @@ from semantic_digital_twin.semantic_annotations import semantic_annotations as s
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from krrood.ormatic.utils import create_engine
-from krrood.ormatic.dao import to_dao
+from krrood.ormatic.data_access_objects.helper import to_dao
 
 DB_NAME = os.getenv("PGDATABASE")
 DB_USER = os.getenv("PGUSER")
@@ -331,9 +330,7 @@ def persist_one_room(
             return None
 
         kwargs = {}
-        needs_root = issubclass(
-            cls, (RootedSemanticAnnotation, HasRootKinematicStructureEntity)
-        )
+        needs_root = issubclass(cls, HasRootKinematicStructureEntity)
         if needs_root and body_id:
             body = body_map.get(body_id)
             if body:

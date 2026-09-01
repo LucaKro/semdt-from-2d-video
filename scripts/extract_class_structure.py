@@ -1,25 +1,22 @@
 import argparse
-from pathlib import Path
-from typing import Dict, List
-import requests
+import base64
 import json
 import os
-import base64
-import time
-import numpy as np
-import trimesh
-
 # Import shared functions from load_warsaw_scene
 import sys
+import time
+from pathlib import Path
+from typing import Dict, List
 
-from semantic_digital_twin.adapters.warsaw_world_loader import WarsawWorldLoader
-from semantic_digital_twin.spatial_types import HomogeneousTransformationMatrix
+import numpy as np
+import requests
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from krrood.ormatic.data_access_objects.helper import to_dao
 from krrood.ormatic.utils import create_engine
+from semantic_digital_twin.adapters.warsaw_world_loader import WarsawWorldLoader
 from semantic_digital_twin.orm.ormatic_interface import Base, WorldMappingDAO
-from krrood.ormatic.dao import to_dao
+from semantic_digital_twin.spatial_types import HomogeneousTransformationMatrix
+from sqlalchemy.orm import Session
 
 sys.path.insert(
     0, str(Path(__file__).parent.parent / "semantic_digital_twin" / "scripts")

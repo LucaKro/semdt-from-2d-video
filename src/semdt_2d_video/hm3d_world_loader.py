@@ -2,7 +2,7 @@
 World loader for HM3D (Habitat-Matterport 3D) Semantics v0.2 scenes.
 
 Parses the semantic annotation GLB + TXT files to produce a World where
-each semantically annotated object is a separate Body with a TriangleMesh.
+each semantically annotated object is a separate Body with a Mesh.
 """
 
 from dataclasses import dataclass, field
@@ -18,7 +18,7 @@ from semantic_digital_twin.datastructures.prefixed_name import PrefixedName
 from semantic_digital_twin.spatial_types import HomogeneousTransformationMatrix
 from semantic_digital_twin.world import World
 from semantic_digital_twin.world_description.connections import FixedConnection
-from semantic_digital_twin.world_description.geometry import Color, TriangleMesh
+from semantic_digital_twin.world_description.geometry import Color, Mesh
 from semantic_digital_twin.world_description.shape_collection import ShapeCollection
 from semantic_digital_twin.world_description.world_entity import Body
 
@@ -281,12 +281,13 @@ class HM3DWorldLoader:
                     [r, g, b, 255], dtype=np.uint8
                 )
 
-                triangle_mesh = TriangleMesh(
+                # The face colors set above carry the annotation color, so the
+                # shape keeps its default color and the mesh's own colors survive.
+                mesh_shape = Mesh.from_trimesh(
                     mesh=combined,
                     origin=HomogeneousTransformationMatrix(),
-                    color=Color(R=r / 255.0, G=g / 255.0, B=b / 255.0),
                 )
-                shape_collection = ShapeCollection([triangle_mesh])
+                shape_collection = ShapeCollection([mesh_shape])
 
                 body = Body(
                     name=PrefixedName(body_name),

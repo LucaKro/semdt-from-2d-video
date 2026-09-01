@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Tuple, Type, Optional, Set
 from uuid import uuid4
 from krrood.class_diagrams.class_diagram import ClassDiagram
-from krrood.ormatic import alternative_mappings
+from krrood.ormatic.data_access_objects import alternative_mappings
 from krrood.ormatic.ormatic import ORMatic
 import requests
 
@@ -39,7 +39,6 @@ from semantic_digital_twin.semantic_annotations.in_memory_builder import (
 )
 from semantic_digital_twin.world_description.world_entity import (
     SemanticAnnotation,
-    RootedSemanticAnnotation,
     Body,
 )
 from semantic_digital_twin.utils import InheritanceStructureExporter
@@ -82,8 +81,9 @@ from semantic_digital_twin.orm.ormatic_interface import WorldMappingDAO, Base
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from krrood.ormatic.utils import create_engine, get_classes_of_ormatic_interface
-from krrood.ormatic.dao import to_dao
+from krrood.ormatic.helper import get_classes_of_ormatic_interface
+from krrood.ormatic.utils import create_engine
+from krrood.ormatic.data_access_objects.helper import to_dao
 
 DB_NAME = os.getenv("PGDATABASE")
 DB_USER = os.getenv("PGUSER")
@@ -559,12 +559,10 @@ Respond with valid JSON:
             kwargs: Dict[str, Any] = {}
 
             # Handle body field — HasRootKinematicStructureEntity covers the
-            # mixin family (HasRootBody, HasRootRegion, HasDoors, …); the
-            # SemanticEnvironmentAnnotation branch (Ceiling, Light, …) inherits
-            # `root` separately via RootedSemanticAnnotation.
-            needs_root = issubclass(
-                cls, (HasRootKinematicStructureEntity, RootedSemanticAnnotation)
-            )
+            # whole mixin family (HasRootBody, HasRootRegion, HasDoors, …), which
+            # the SemanticEnvironmentAnnotation branch (Ceiling, Light, …) reaches
+            # through HasRootBody.
+            needs_root = issubclass(cls, HasRootKinematicStructureEntity)
             if needs_root:
                 if not annotation.body_id:
                     return None, (

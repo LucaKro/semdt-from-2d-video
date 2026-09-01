@@ -28,7 +28,7 @@ from semantic_digital_twin.adapters.warsaw_world_loader import WarsawWorldLoader
 from semantic_digital_twin.spatial_computations.raytracer import RayTracer
 from semantic_digital_twin.spatial_types import HomogeneousTransformationMatrix
 from semantic_digital_twin.world import World
-from semantic_digital_twin.world_description.geometry import TriangleMesh, FileMesh
+from semantic_digital_twin.world_description.geometry import Mesh
 from semantic_digital_twin.world_description.shape_collection import ShapeCollection
 
 # Database connection settings from environment
@@ -338,18 +338,13 @@ def reload_textures_from_objects_dir(world: World, objects_dir: Path) -> World:
 
                         # Update collision shapes
                         for collision in body.collision:
-                            if (
-                                isinstance(collision, FileMesh)
-                                and not updated_collision
-                            ):
-                                # Replace FileMesh with TriangleMesh containing the reloaded mesh
-                                # Make sure to preserve the visual material
-                                mesh_for_collision = reloaded_mesh.copy()
-                                new_collision = TriangleMesh(
+                            if isinstance(collision, Mesh) and not updated_collision:
+                                # Rebuild the shape around the reloaded mesh, leaving its
+                                # color at the default so the mesh's own material shows.
+                                new_collision = Mesh.from_trimesh(
+                                    mesh=reloaded_mesh.copy(),
                                     origin=collision.origin,
                                     scale=collision.scale,
-                                    color=collision.color,
-                                    mesh=mesh_for_collision,
                                 )
                                 # Verify material is preserved
                                 if (
@@ -359,28 +354,19 @@ def reload_textures_from_objects_dir(world: World, objects_dir: Path) -> World:
                                     print(f"    Material preserved in collision mesh")
                                 new_collision_shapes.append(new_collision)
                                 updated_collision = True
-                            elif (
-                                isinstance(collision, TriangleMesh)
-                                and not updated_collision
-                            ):
-                                # Update TriangleMesh directly
-                                collision.mesh = reloaded_mesh.copy()
-                                new_collision_shapes.append(collision)
-                                updated_collision = True
                             else:
                                 # Keep other collision shapes as-is
                                 new_collision_shapes.append(collision)
 
                         # Update visual shapes
                         for visual in body.visual:
-                            if isinstance(visual, FileMesh) and not updated_visual:
-                                # Replace FileMesh with TriangleMesh containing the reloaded mesh
-                                mesh_for_visual = reloaded_mesh.copy()
-                                new_visual = TriangleMesh(
+                            if isinstance(visual, Mesh) and not updated_visual:
+                                # Rebuild the shape around the reloaded mesh, leaving its
+                                # color at the default so the mesh's own material shows.
+                                new_visual = Mesh.from_trimesh(
+                                    mesh=reloaded_mesh.copy(),
                                     origin=visual.origin,
                                     scale=visual.scale,
-                                    color=visual.color,
-                                    mesh=mesh_for_visual,
                                 )
                                 # Verify material is preserved
                                 if (
@@ -389,13 +375,6 @@ def reload_textures_from_objects_dir(world: World, objects_dir: Path) -> World:
                                 ):
                                     print(f"    Material preserved in visual mesh")
                                 new_visual_shapes.append(new_visual)
-                                updated_visual = True
-                            elif (
-                                isinstance(visual, TriangleMesh) and not updated_visual
-                            ):
-                                # Update TriangleMesh directly
-                                visual.mesh = reloaded_mesh.copy()
-                                new_visual_shapes.append(visual)
                                 updated_visual = True
                             else:
                                 # Keep other visual shapes as-is
@@ -460,26 +439,15 @@ def reload_textures_from_objects_dir(world: World, objects_dir: Path) -> World:
                             new_collision_shapes = []
                             updated = False
                             for collision in body.collision:
-                                if isinstance(collision, FileMesh) and not updated:
-                                    # Replace FileMesh with TriangleMesh containing the reloaded mesh
-                                    new_collision = TriangleMesh(
+                                if isinstance(collision, Mesh) and not updated:
+                                    # Rebuild the shape around the reloaded mesh, leaving
+                                    # its color at the default so the material shows.
+                                    new_collision = Mesh.from_trimesh(
+                                        mesh=reloaded_mesh,
                                         origin=collision.origin,
                                         scale=collision.scale,
-                                        color=collision.color,
-                                        mesh=reloaded_mesh,
                                     )
                                     new_collision_shapes.append(new_collision)
-                                    updated = True
-                                    reloaded_count += 1
-                                    print(
-                                        f"  Reloaded {body_name}.obj from {obj_file.name} with textures"
-                                    )
-                                elif (
-                                    isinstance(collision, TriangleMesh) and not updated
-                                ):
-                                    # Update TriangleMesh directly
-                                    collision.mesh = reloaded_mesh
-                                    new_collision_shapes.append(collision)
                                     updated = True
                                     reloaded_count += 1
                                     print(
