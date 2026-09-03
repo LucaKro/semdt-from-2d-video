@@ -14,9 +14,34 @@ from semantic_digital_twin.orm.ormatic_interface import Base, WorldMappingDAO
 from semantic_digital_twin.orm.utils import semantic_digital_twin_sessionmaker
 from sqlalchemy.orm import Session
 
+from semantic_digital_twin.world_description.world_entity import Body
 from semdt_2d_video.hm3d_world_loader import HM3DWorldLoader
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+
+MAXIMUM_HIGHLIGHT_LABEL_LENGTH = 120
+"""How many characters of highlighted body names an image filename carries."""
+
+
+def highlight_label(bodies: List[Body]) -> str:
+    """
+    Name the bodies a render highlights, so its filename says what is colored in it.
+
+    :param bodies: The bodies highlighted in the render.
+    :return: Their names joined by dashes, cut short of the length a filename can hold.
+    """
+    names = [str(body.name).replace(" ", "_") for body in bodies]
+    if len("-".join(names)) <= MAXIMUM_HIGHLIGHT_LABEL_LENGTH:
+        return "-".join(names)
+
+    kept: List[str] = []
+    length = 0
+    for name in names:
+        if length + len(name) + 1 > MAXIMUM_HIGHLIGHT_LABEL_LENGTH:
+            break
+        kept.append(name)
+        length += len(name) + 1
+    return "-".join(kept + [f"and_{len(names) - len(kept)}_more"])
 
 
 def encode_image_bytes(image_bytes: bytes) -> str:
@@ -353,7 +378,7 @@ def main(args):
                 for pose_name, camera_pose in camera_poses_dict.items():
                     image_bytes = batch_loader.render_scene_from_camera_pose(
                         camera_pose,
-                        image_dir / f"scene_{i}_{pose_name}.png",
+                        image_dir / f"scene_{i}_{pose_name}__{highlight_label(group)}.png",
                         headless=args.headless,
                     )
                     highlighted_images.append(image_bytes)
@@ -467,7 +492,7 @@ def main(args):
                 for pose_name, camera_pose in camera_poses_dict.items():
                     batch_loader.render_scene_from_camera_pose(
                         camera_pose,
-                        image_dir / f"scene_{i}_{pose_name}.png",
+                        image_dir / f"scene_{i}_{pose_name}__{highlight_label(group)}.png",
                         headless=args.headless,
                     )
 

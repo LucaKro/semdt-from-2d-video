@@ -21,7 +21,7 @@ Output structure:
           room<N>/                    (or "all/" when --num-rooms is not used)
             images/
               scene_orig_<pose>.png
-              scene_<group>_<pose>.png
+              scene_<group>_<pose>__<highlighted bodies>.png
             vlm_responses.json
             vlm_summary.json
             resolution_log.json       (from refine)
