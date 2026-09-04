@@ -24,11 +24,18 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections import Counter
+from collections import Counter, defaultdict
+from itertools import combinations
 from pathlib import Path
-from typing import Dict, List, Optional, Type
+from typing import Dict, List, Optional, Tuple, Type
 
-from experiments.warsaw.segment_relations import SegmentRelations, segment_evidence
+import numpy as np
+
+from experiments.warsaw.segment_relations import (
+    SegmentRelations,
+    claimant_groups,
+    segment_evidence,
+)
 from experiments.warsaw.world_loader import (
     VIEWPOINT_ALONE,
     VIEWPOINT_IN_ROOM,
@@ -215,6 +222,140 @@ def classes_of_labels(
     return classes
 
 
+def group_highlights(
+    segments: List[LabelSegment], contested: np.ndarray
+) -> Tuple[List[Tuple[Color, np.ndarray]], Dict[str, Color]]:
+    """
+    Color a set of objects so that what they disagree about can be seen.
+
+    Each gets a color of its own, and the faces all of them claim get one more, painted
+    last. A picture without that last color shows the contested faces as belonging to
+    whichever object was painted over them, which is the very thing in question.
+
+    :param segments: The objects to color.
+    :param contested: The faces they all claim.
+    :return: What to paint, and what each color stands for.
+    """
+    colors = Color.distinct_colors(len(segments) + 1)
+    highlights = [
+        (color, segment.faces) for color, segment in zip(colors, segments)
+    ]
+    highlights.append((colors[-1], contested))
+    legend = {str(segment.name): color for color, segment in zip(colors, segments)}
+    legend["contested"] = colors[-1]
+    return highlights, legend
+
+
+def open_questions(
+    loader: WarsawWorldLoader,
+    relations: SegmentRelations,
+    records: List[Dict[str, object]],
+) -> Dict[str, List[Dict[str, object]]]:
+    """
+    Work out what is actually left to decide, and how few questions it takes.
+
+    Three things shrink the pile. A face belongs to one object, so the question is asked
+    once per set of claimants rather than once per pair of them. A group whose every
+    internal pair the ontology settled as a part-whole relation is not a question at all,
+    since the part keeps the surface it is made of. And what is left repeats: a door and a
+    window sharing a pane is one question however many glazed doors the room has, so the
+    groups are gathered by the classes in them and asked once per pattern.
+
+    Which whole a part belongs to is a separate question, and only where a part overlaps
+    more than one candidate: a drawer that meets exactly one cabinet has nothing to
+    choose between.
+
+    :param loader: The loaded scene.
+    :param relations: The measured scene.
+    :param records: The pairs, as they were written out.
+    :return: The ownership questions, the membership questions, and the groups that need
+        neither.
+    """
+    segments = loader.label_segments
+    groups = claimant_groups(
+        [segment.faces for segment in segments],
+        [str(segment.name) for segment in segments],
+        len(loader.scene_mesh.faces),
+    )
+    status = {
+        tuple(sorted((record["one"], record["other"]))): record["status"]
+        for record in records
+    }
+    labels = {name: descriptor.class_name for name, descriptor in relations.descriptors.items()}
+
+    settled, patterns = [], defaultdict(list)
+    for group in groups:
+        inside = [
+            status.get(tuple(sorted(pair)))
+            for pair in combinations(group.names, 2)
+        ]
+        if all(answer == RELATION_KNOWN for answer in inside):
+            settled.append(group.to_json())
+        else:
+            patterns[tuple(sorted(labels[name] for name in group.names))].append(group)
+
+    ownership = []
+    for pattern, members in sorted(patterns.items(), key=lambda one: -len(one[1])):
+        exemplar = max(members, key=lambda group: len(group.faces))
+        ownership.append(
+            {
+                "name": "__".join(pattern),
+                "kind": "ownership",
+                "pattern": list(pattern),
+                "shown": list(exemplar.names),
+                "faces": [int(face) for face in exemplar.faces],
+                "covers": [group.to_json() for group in members],
+                "contested_faces": sum(len(group.faces) for group in members),
+                "images": [],
+            }
+        )
+
+    # A part is attached to the whole it belongs to, so a candidate has to share faces
+    # with it or touch it along an edge. Everything else the measurement reached is
+    # merely nearby, and offering it as an alternative is offering a wrong answer: it
+    # trebles the questions and none of what it adds could be right.
+    candidates = defaultdict(dict)
+    for record in records:
+        if record["status"] != RELATION_KNOWN:
+            continue
+        if not record["shared_faces"] and not record["touching_edges"]:
+            continue
+        admitted = record["admissible"][0]
+        whole, part = record["one"], record["other"]
+        if labels[whole] not in record["classes"] or record["classes"][labels[whole]] != admitted["whole"]:
+            whole, part = part, whole
+        candidates[part][whole] = {
+            "field": admitted["field"],
+            "shared_faces": record["shared_faces"],
+        }
+
+    membership = [
+        {
+            "name": part,
+            "kind": "membership",
+            "part": part,
+            "shown": [part] + sorted(wholes),
+            "faces": [],
+            "candidates": {name: how for name, how in sorted(wholes.items())},
+            "images": [],
+        }
+        for part, wholes in sorted(candidates.items())
+        if len(wholes) > 1
+    ]
+
+    forced = [
+        {"part": part, "whole": next(iter(wholes)), **next(iter(wholes.values()))}
+        for part, wholes in sorted(candidates.items())
+        if len(wholes) == 1
+    ]
+    return {
+        "ownership": ownership,
+        "membership": membership,
+        "settled": settled,
+        "forced": forced,
+    }
+
+
 def write_images(images: Dict[str, bytes], directory: Path, prefix: str) -> List[str]:
     """
     :param images: The renders to write, by viewpoint.
@@ -346,46 +487,48 @@ def build(arguments: argparse.Namespace) -> None:
 
     (output / "vocabulary_request.json").write_text(json.dumps(request, indent=2))
 
-    if arguments.adjudication_renders:
-        # Every pair sharing faces needs a picture, whatever the ontology made of it.
-        # Where it named a relation, which cabinet this drawer belongs to is still open;
-        # where it named none, the faces the two labels both claim still belong to one
-        # of them. Neither is a question the taxonomy can answer.
-        undecided = [record for record in records if record["shared_faces"]][
-            : arguments.adjudication_renders
-        ]
-        print(f"rendering {len(undecided)} adjudications ...")
-        for record in undecided:
-            one, other = segments[record["one"]], segments[record["other"]]
-            highlights, legend = loader.pair_highlights(one, other)
-            record["images"] = write_images(
+    questions = open_questions(loader, relations, records)
+    print(
+        f"\n{len(questions['ownership'])} class patterns and "
+        f"{len(questions['membership'])} memberships are open; "
+        f"{len(questions['settled'])} groups the ontology settles"
+    )
+
+    if arguments.question_renders:
+        asked = (
+            questions["ownership"][: arguments.question_renders]
+            + questions["membership"][: arguments.question_renders]
+        )
+        print(f"rendering {len(asked)} questions ...")
+        for question in asked:
+            shown = [segments[name] for name in question["shown"]]
+            highlights, legend = group_highlights(
+                shown, np.asarray(question["faces"], dtype=np.int64)
+            )
+            question["images"] = write_images(
                 loader.render_region(
-                    [one, other],
+                    shown,
                     highlights,
                     viewpoints=arguments.viewpoints,
                     headless=arguments.headless,
                     choose_viewpoint=arguments.best_viewpoint,
                     context_segments=neighbourhood(
-                        relations, segments, [record["one"], record["other"]]
+                        relations, segments, question["shown"]
                     ),
                 ),
-                output / "adjudications",
-                f"{record['one']}__{record['other']}",
+                output / "questions",
+                question["name"],
             )
-            record["legend"] = {
+            question["legend"] = {
                 name: color.closest_css3_name() for name, color in legend.items()
             }
-            print(f"  {record['one']} & {record['other']}")
-        (output / "relations.json").write_text(
-            json.dumps(
-                {
-                    "scene": str(loader.scene.mesh_path),
-                    "segments": relations.to_json()["segments"],
-                    "pairs": records,
-                },
-                indent=2,
-            )
-        )
+            print(f"  {question['name']}")
+
+    for question in questions["ownership"] + questions["membership"]:
+        question.pop("faces", None)
+    (output / "questions.json").write_text(
+        json.dumps({"scene": str(loader.scene.mesh_path), **questions}, indent=2)
+    )
 
     counted = Counter(record["status"] for record in records)
     print(f"\ntaxonomy: {len(taxonomy['classes'])} classes, "
@@ -430,10 +573,12 @@ def main() -> None:
         help="Render one exemplar per label for the vocabulary question.",
     )
     parser.add_argument(
-        "--adjudication-renders",
+        "--question-renders",
         type=int,
         default=0,
-        help="Render this many overlapping pairs the ontology does not settle.",
+        help="Render at most this many of each kind of open question. One picture per "
+        "class pattern and per contested membership, not one per overlapping pair: "
+        "there are two hundred of those and a fifth as many questions in them.",
     )
     parser.add_argument(
         "--viewpoints",
