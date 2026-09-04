@@ -44,6 +44,8 @@ Rules:
 - "class" is a name from the ontology's classes, or a name you propose.
 - If you propose one, "is_new_class" is true and "superclass" is a class of the ontology.
 - Judge the object, not the paint: the colors mark what to look at, nothing more.
+- A class marked "abstract" cannot be given to an object. Name one of its subclasses,
+  or propose a new class with it as the superclass.
 
 Answer with JSON and nothing else:
 {"objects": [{"name": "drawer_19", "class": "Drawer", "is_new_class": false,
