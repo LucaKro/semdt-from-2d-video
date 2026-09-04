@@ -34,6 +34,7 @@ from semantic_digital_twin.semantic_annotations.part_whole import admissible_rel
 from semantic_digital_twin.world_description.geometry import Color
 from semantic_digital_twin.semantic_annotations.taxonomy_export import (
     annotation_classes,
+    compose_class,
     export_taxonomy,
 )
 from semantic_digital_twin.world_description.world_entity import SemanticAnnotation
@@ -146,6 +147,49 @@ def neighbourhood(
     return [segments[name] for name in sorted(wanted)]
 
 
+def classes_of_labels(
+    vocabulary: Dict[str, object], known: Dict[str, Type]
+) -> Dict[str, Optional[Type]]:
+    """
+    Turn a mapping of labels onto classes into the classes it names.
+
+    A label mapped to a class of the taxonomy is looked up. One mapped to a class that
+    was proposed rather than found is *composed* from the superclass and mixins the
+    proposal names, because the class does not exist yet and it is exactly those that
+    decide what it admits: composed with ``HasDrawers`` it can hold the drawers
+    overlapping it, without it it can hold nothing, and the pairs below turn on that.
+
+    A flat ``{label: class name}`` is read too, so a mapping written by hand to try
+    something out needs no more than that.
+
+    :param vocabulary: What :mod:`pipeline_scripts.map_label_vocabulary` wrote, or a
+        flat mapping.
+    :param known: The taxonomy's classes by name.
+    :return: Per label, the class it stands for, or None where it stands for none.
+    """
+    labels = vocabulary.get("labels", vocabulary)
+    classes: Dict[str, Optional[Type]] = {}
+    for label, answer in labels.items():
+        if answer is None or isinstance(answer, str):
+            classes[label] = known.get(answer) if answer else None
+            continue
+
+        name = answer.get("class")
+        if not name or answer.get("problems"):
+            classes[label] = None
+            if name:
+                print(f"  {label}: leaving unmapped, {answer['problems'][0]}")
+        elif not answer.get("is_new_class"):
+            classes[label] = known.get(name)
+        else:
+            classes[label] = compose_class(
+                name,
+                known[answer["superclass"]],
+                [known[mixin] for mixin in answer.get("mixins") or []],
+            )
+    return classes
+
+
 def write_images(images: Dict[str, bytes], directory: Path, prefix: str) -> List[str]:
     """
     :param images: The renders to write, by viewpoint.
@@ -184,12 +228,10 @@ def build(arguments: argparse.Namespace) -> None:
 
     taxonomy = export_taxonomy(SemanticAnnotation, output / "taxonomy.json")
     known = annotation_classes(SemanticAnnotation)
-    vocabulary = (
-        json.loads(arguments.vocabulary.read_text()) if arguments.vocabulary else {}
+    classes = classes_of_labels(
+        json.loads(arguments.vocabulary.read_text()) if arguments.vocabulary else {},
+        known,
     )
-    classes = {
-        label: known.get(class_name) for label, class_name in vocabulary.items()
-    }
 
     records = []
     for pair in relations.pairs:
@@ -226,6 +268,7 @@ def build(arguments: argparse.Namespace) -> None:
 
     standing_for = exemplars(relations)
     request = {
+        "scene": str(loader.scene.mesh_path),
         "question": (
             "Each label below names objects in a scanned room. Say which class of the "
             "taxonomy each label is, or propose a new class by naming a superclass and "
