@@ -1,23 +1,22 @@
 """
-Decide what two overlapping labels are to each other, and whose faces the shared ones are.
+Answer what the measurements and the ontology leave open about a scene's overlaps.
 
-Where a scan labels the same faces twice -- a drawer front that is also the cabinet, a
-pane that is also the door -- two things stay open after everything measurable has been
-measured and the ontology has said what it admits:
+Two things stand between a labelled mesh and a world of bodies, and neither follows from
+the geometry:
 
-- what the two objects are to each other, which decides how the world mounts them,
-- which of them the contested faces belong to, which is what lets the mesh be split at
-  all, since a face can only be given to one body.
+- **who owns a face two labels both claim**, without which the mesh cannot be split, since
+  a face belongs to exactly one body;
+- **which whole a part belongs to**, where a door meets more than one cabinet.
 
-Neither follows from the geometry: a handle 100% inside a drawer and a drawer front 100%
-inside a cabinet measure the same and mean different things. This asks a model, pair by
-pair, with the measurements, what the ontology admits, and the three pictures the
-evidence run produced::
+Both are asked as few times as they are actually open. Ownership is asked once per set of
+claimants rather than once per pair of them, never where the ontology already settled
+every relation inside the set, and once per *pattern* of classes rather than once per
+occurrence -- a door and a window sharing a pane is one question however many glazed doors
+the room has. Membership is asked only where a part meets more than one candidate::
 
     python -m pipeline_scripts.adjudicate_overlaps pipeline_out_relations
 
-It decides nothing itself and mounts nothing: it writes ``adjudications.json``, which the
-split and the mounting then read.
+It writes ``adjudications.json``, which the split then reads. It decides nothing itself.
 """
 
 from __future__ import annotations
@@ -30,153 +29,182 @@ from typing import Any, Dict, List, Sequence
 
 from pipeline_scripts import model_client
 
-PART = "part"
-"""
-One is a structural part of the other, mounted with ``add()``.
-"""
+OWNERSHIP_PROMPT = """\
+You decide whose surface a piece of a scanned room is.
 
-CONTAINS = "contains"
-"""
-One is merely inside or on the other, mounted with ``add_object()``.
-"""
+Several objects were labelled onto the same faces, and every face has to be given to
+exactly one of them before the room can be cut into objects at all. You are shown one
+such piece: each object in its own color, and the faces all of them claim in one more.
 
-SUPPORTS = "supports"
-"""
-One is a surface the other rests on, mounted with ``add_supporting_surface()``.
-"""
+Answer with the object whose surface those contested faces are. The one to pick is the
+one the faces *are*: a drawer front is the drawer's surface even though the cabinet it
+sits in was labelled over it too, and a handle is the handle's even though it was
+labelled as the door it is screwed to.
 
-SAME_OBJECT = "same-object"
-"""
-Two labels were put on one object, so only one body should come out of them.
-"""
-
-UNRELATED = "unrelated"
-"""
-They stand in no relation the world mounts; they merely share a surface.
-"""
-
-RELATIONS = (PART, CONTAINS, SUPPORTS, SAME_OBJECT, UNRELATED)
-"""
-Everything a pair may be answered with.
-"""
-
-ANSWER_FIELDS = ("relation", "whole", "field", "owner", "confidence", "reason")
-"""
-What is kept of an answer, so a model's extra fields do not reach the file.
-"""
-
-SYSTEM_PROMPT = """\
-You decide what two overlapping objects in a scanned room are to each other.
-
-Both carry a label from the scan, and some faces carry both labels. Two things are open:
-
-1. What they are to each other:
-   - "part": one is a structural part of the other, mounted with add(),
-   - "contains": one is merely inside or resting on the other, mounted with add_object(),
-   - "supports": one is a surface the other rests on,
-   - "same-object": the two labels were put on one and the same object,
-   - "unrelated": they stand in no relation; they only share a surface.
-2. Which of the two the faces they both claim belong to. The mesh is split by giving
-   every face to exactly one object, so this has to be answered whatever the relation is.
-   A part keeps its own surface; the thing it is part of is what is left over.
-
-You are told which relations the ontology admits between their classes. Do not answer
-"part", "contains" or "supports" with anything it does not admit -- if none of them fits
-what you see, answer "unrelated".
-
-Nothing in the measurements settles this on its own: a handle wholly inside a drawer and
-a drawer front wholly inside a cabinet measure alike and mean different things. Read the
-pictures.
+Answer for the kind of situation, not for this one room: the same answer will be used
+everywhere these labels meet like this.
 
 Answer with JSON and nothing else:
-{"relation": "part", "whole": "<the name of the one that holds>",
- "field": "<the field it would be held in, when the relation is part, else null>",
- "owner": "<the name of the one the shared faces belong to>",
- "confidence": 0.0, "reason": "one sentence"}"""
+{"owner": "<one of the labels>", "confidence": 0.0, "reason": "one sentence"}"""
+
+MEMBERSHIP_PROMPT = """\
+You decide which object a part belongs to.
+
+A scanned room labelled a part that meets several objects it could belong to. The
+ontology already says it is a part of one of them; which one is what the pictures show.
+Each candidate has its own color and the part has its own.
+
+Judge by what the pictures show, not by how much surface is shared: a part sits in one of
+them and merely touches the others.
+
+Answer with JSON and nothing else:
+{"whole": "<one of the candidates>", "confidence": 0.0, "reason": "one sentence"}"""
 
 CAPTIONS = {
-    "closeup": "Picture 1 -- the two of them alone, with nothing in front of them.",
+    "closeup": "Picture 1 -- the objects alone, with nothing in front of them.",
     "context": "Picture 2 -- where they are in the room, painted the same way.",
-    "plain": "Picture 3 -- the same two, in the colors they were scanned in.",
+    "plain": "Picture 3 -- the same objects, in the colors they were scanned in.",
 }
 """
-What each of a pair's three renders shows, in the order they are shown in.
+What each render shows, in the order they are shown in.
 """
 
 
-def name_of(record: Dict[str, Any], which: str) -> str:
+def pictures(question: Dict[str, Any], images: Path) -> List[Dict[str, Any]]:
     """
-    :param record: The pair's record of ``relations.json``.
-    :param which: ``one`` or ``other``.
-    :return: The name of that segment.
+    :param question: The question, as ``questions.json`` holds it.
+    :param images: The directory holding its renders.
+    :return: The renders as parts of a message, captioned.
     """
-    return record[which]
-
-
-def admits(record: Dict[str, Any]) -> str:
-    """
-    Say what the ontology admits between a pair's classes, as a model reads it.
-
-    :param record: The pair's record of ``relations.json``.
-    :return: The admissible mounts, or a sentence saying there are none.
-    """
-    lines = [
-        f"part: {relation['whole']}.{relation['field']} may hold a "
-        f"{relation['part']}, mounted with add()"
-        + (
-            "  (mounting here cuts the part's volume out of the whole)"
-            if relation.get("removes_geometry")
-            else ""
-        )
-        for relation in record["admissible"]
-    ]
-    lines += [
-        f"{mount['kind']}: {mount['whole']}.{mount['field']} may hold a "
-        f"{mount['target']}, mounted with {mount['mounted_by']}()"
-        for mount in record.get("other_mounts", [])
-    ]
-    if not lines:
-        return "Nothing: neither class can hold the other in any way."
-    return "\n".join(lines)
-
-
-def question_for(
-    record: Dict[str, Any], images: Path, problems: Sequence[str] = ()
-) -> List[Dict[str, Any]]:
-    """
-    Build the message asking what one pair is.
-
-    :param record: The pair's record of ``relations.json``.
-    :param images: The directory holding the pair's renders.
-    :param problems: What was wrong with the answer to the same question, when this is
-        another attempt at it.
-    :return: The message, as :func:`model_client.ask` takes it.
-    """
-    legend = record["legend"]
-    classes = record["classes"]
-    described = "\n".join(
-        f"{record[which]}, labelled \"{label}\", read as "
-        f"{classes.get(label) or 'no class'}, painted {legend[record[which]]}"
-        for which, label in zip(("one", "other"), record["classes"])
-    )
-    content = [
-        model_client.text_part(
-            f"## The two objects\n{described}\n"
-            f"The faces both of them claim are painted {legend['both']}.\n\n"
-            f"## What was measured\n{record['prompt_block']}\n\n"
-            f"## What the ontology admits\n{admits(record)}"
-        )
-    ]
-
     named = {
         filename.rsplit("__", 1)[-1].split("_", 1)[0]: filename
-        for filename in record["images"]
+        for filename in question["images"]
     }
+    content = []
     for kind, caption in CAPTIONS.items():
         if kind in named:
             content.append(model_client.text_part(caption))
             content.append(model_client.image_part(images / named[kind]))
+    return content
 
+
+def painted(question: Dict[str, Any], labels: Dict[str, str]) -> str:
+    """
+    :param question: The question, as ``questions.json`` holds it.
+    :param labels: Per segment, the label it carries.
+    :return: What each color in the pictures stands for.
+    """
+    legend = question.get("legend", {})
+    lines = [
+        f'{name} (labelled "{labels[name]}") is {legend[name]}'
+        for name in question["shown"]
+        if name in legend
+    ]
+    if "contested" in legend:
+        lines.append(f"the faces all of them claim are {legend['contested']}")
+    return "\n".join(lines)
+
+
+def ownership_question(
+    question: Dict[str, Any], labels: Dict[str, str], images: Path
+) -> List[Dict[str, Any]]:
+    """
+    Build the message asking whose the contested faces are.
+
+    :param question: The question, as ``questions.json`` holds it.
+    :param labels: Per segment, the label it carries.
+    :param images: The directory holding its renders.
+    :return: The message, as :func:`model_client.ask` takes it.
+    """
+    covered = len(question["covers"])
+    return [
+        model_client.text_part(
+            f"## The labels\n{', '.join(question['pattern'])}\n\n"
+            f"## The picture\n{painted(question, labels)}\n\n"
+            f"## How often this happens\n"
+            f"Objects with these labels are labelled over the same faces "
+            f"{covered} time(s) in this room, {question['contested_faces']} faces in "
+            f"all. The pictures show the largest of them."
+        )
+    ] + pictures(question, images)
+
+
+def membership_question(
+    question: Dict[str, Any], labels: Dict[str, str], images: Path
+) -> List[Dict[str, Any]]:
+    """
+    Build the message asking which whole a part belongs to.
+
+    :param question: The question, as ``questions.json`` holds it.
+    :param labels: Per segment, the label it carries.
+    :param images: The directory holding its renders.
+    :return: The message, as :func:`model_client.ask` takes it.
+    """
+    measured = "\n".join(
+        f"{name}: shares {how['shared_faces']} faces with it, and would hold it in "
+        f"its {how['field']}"
+        for name, how in question["candidates"].items()
+    )
+    return [
+        model_client.text_part(
+            f"## The part\n{question['part']}, labelled "
+            f"\"{labels[question['part']]}\"\n\n"
+            f"## The candidates\n{measured}\n\n"
+            f"## The picture\n{painted(question, labels)}"
+        )
+    ] + pictures(question, images)
+
+
+def check(question: Dict[str, Any], answer: Dict[str, Any]) -> List[str]:
+    """
+    Say what is wrong with an answer, if anything.
+
+    :param question: The question it answers.
+    :param answer: What the model said.
+    :return: One sentence per problem, empty when there are none.
+    """
+    if question["kind"] == "ownership":
+        allowed, given, what = question["pattern"], answer.get("owner"), "owner"
+    else:
+        allowed, given, what = (
+            list(question["candidates"]),
+            answer.get("whole"),
+            "whole",
+        )
+    if given not in allowed:
+        return [f"{given!r} is not one of the {what}s to choose from: {', '.join(allowed)}"]
+    return []
+
+
+def ask_about(
+    question: Dict[str, Any],
+    labels: Dict[str, str],
+    images: Path,
+    answers: Path,
+    model: str,
+    reuse: bool,
+    problems: Sequence[str] = (),
+) -> Dict[str, Any]:
+    """
+    Put one question to the model, or read back what it already said about it.
+
+    :param question: The question, as ``questions.json`` holds it.
+    :param labels: Per segment, the label it carries.
+    :param images: The directory holding the renders.
+    :param answers: The directory raw responses are kept in.
+    :param model: Which model to ask.
+    :param reuse: Whether to read a kept response rather than ask again.
+    :param problems: What was wrong with the previous answer, when there was one.
+    :return: The response.
+    """
+    kept = answers / f"{question['kind']}__{question['name']}.json"
+    if reuse and kept.exists() and not problems:
+        return json.loads(kept.read_text())
+
+    build = (
+        ownership_question if question["kind"] == "ownership" else membership_question
+    )
+    content = build(question, labels, images)
     if problems:
         content.append(
             model_client.text_part(
@@ -185,115 +213,10 @@ def question_for(
                 + "\nAnswer the same question again, correcting that."
             )
         )
-    return content
-
-
-def check(answer: Dict[str, Any], record: Dict[str, Any]) -> List[str]:
-    """
-    Say what is wrong with an answer, if anything.
-
-    An answer naming a relation the ontology does not admit is one the mount would raise
-    on, and an answer giving the contested faces to neither object leaves the mesh
-    unsplittable, so both are worth catching here rather than three steps later.
-
-    :param answer: What the model said.
-    :param record: The pair's record of ``relations.json``.
-    :return: One sentence per problem, empty when there are none.
-    """
-    problems = []
-    names = (record["one"], record["other"])
-    relation, whole, field = answer["relation"], answer["whole"], answer["field"]
-
-    if relation not in RELATIONS:
-        problems.append(f"{relation!r} is not one of {', '.join(RELATIONS)}")
-    if answer["owner"] not in names:
-        problems.append(
-            f"the shared faces were given to {answer['owner']!r}, which is neither "
-            f"{names[0]} nor {names[1]}"
-        )
-
-    if relation not in (PART, CONTAINS, SUPPORTS):
-        return problems
-
-    if whole not in names:
-        problems.append(
-            f"{whole!r} was named as the one that holds, which is neither "
-            f"{names[0]} nor {names[1]}"
-        )
-        return problems
-
-    holding = record["classes"].get(_label_of(record, whole))
-    if relation == PART:
-        fields = [
-            entry["field"]
-            for entry in record["admissible"]
-            if entry["whole"] == holding
-        ]
-    else:
-        fields = [
-            mount["field"]
-            for mount in record.get("other_mounts", [])
-            if mount["whole"] == holding and mount["kind"] == relation
-        ]
-
-    if not fields:
-        problems.append(
-            f"the ontology admits no {relation} relation with {holding} holding"
-        )
-    elif field is None and len(fields) == 1:
-        answer["field"] = fields[0]
-    elif field not in fields:
-        problems.append(
-            f"{field!r} is not a field {holding} could hold it in; "
-            f"the ontology admits {', '.join(fields)}"
-        )
-    return problems
-
-
-def _label_of(record: Dict[str, Any], name: str) -> str:
-    """
-    :param record: The pair's record of ``relations.json``.
-    :param name: The name of one of its segments.
-    :return: The label that segment carries.
-    """
-    which = "one" if record["one"] == name else "other"
-    return list(record["classes"])[0 if which == "one" else 1]
-
-
-def read(response: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    :param response: What the model answered with.
-    :return: The fields of its answer that are kept.
-    """
-    answered = model_client.parse_json_answer(model_client.answer_text(response))
-    return {field: answered.get(field) for field in ANSWER_FIELDS}
-
-
-def ask_about(
-    record: Dict[str, Any],
-    images: Path,
-    answers: Path,
-    model: str,
-    reuse: bool,
-    problems: Sequence[str] = (),
-) -> Dict[str, Any]:
-    """
-    Put one pair to the model, or read back what it already said about it.
-
-    :param record: The pair's record of ``relations.json``.
-    :param images: The directory holding the pair's renders.
-    :param answers: The directory raw responses are kept in.
-    :param model: Which model to ask.
-    :param reuse: Whether to read a kept response rather than ask again.
-    :param problems: What was wrong with the previous answer, when there was one.
-    :return: The response.
-    """
-    kept = answers / f"{record['one']}__{record['other']}.json"
-    if reuse and kept.exists() and not problems:
-        return json.loads(kept.read_text())
-
     response = model_client.ask(
-        question_for(record, images, problems), SYSTEM_PROMPT, model=model
+        content,
+        OWNERSHIP_PROMPT if question["kind"] == "ownership" else MEMBERSHIP_PROMPT,
+        model=model,
     )
     answers.mkdir(parents=True, exist_ok=True)
     kept.write_text(json.dumps(response, indent=2))
@@ -302,88 +225,98 @@ def ask_about(
 
 def build(arguments: argparse.Namespace) -> None:
     """
-    Adjudicate the overlapping pairs of an evidence run.
+    Answer the open questions of an evidence run.
 
     :param arguments: The command line arguments.
     """
     evidence = arguments.evidence_directory
+    questions = json.loads((evidence / "questions.json").read_text())
     relations = json.loads((evidence / "relations.json").read_text())
+    labels = {segment["name"]: segment["class"] for segment in relations["segments"]}
 
-    overlapping = [pair for pair in relations["pairs"] if pair["shared_faces"]]
-    ready = [pair for pair in overlapping if pair.get("images")]
-    if len(ready) < len(overlapping):
+    asked = questions["ownership"] + questions["membership"]
+    without = [question for question in asked if not question["images"]]
+    if without:
         print(
-            f"{len(overlapping) - len(ready)} of {len(overlapping)} overlapping pairs "
-            f"have no renders yet; run build_relation_evidence with "
-            f"--adjudication-renders to make them."
+            f"{len(without)} of {len(asked)} questions have no renders yet; run "
+            f"build_relation_evidence with --question-renders to make them."
         )
-    ready = ready[: arguments.limit] if arguments.limit else ready
+    asked = [question for question in asked if question["images"]]
+    asked = asked[: arguments.limit] if arguments.limit else asked
 
-    print(f"asking {arguments.model} about {len(ready)} pairs ...")
-    adjudicated = []
-    for record in ready:
+    print(f"asking {arguments.model} about {len(asked)} questions ...")
+    answered = []
+    for question in asked:
         problems: Sequence[str] = ()
         for attempt in range(1 + arguments.corrections):
             response = ask_about(
-                record,
-                evidence / "adjudications",
-                evidence / "adjudication_answers",
+                question,
+                labels,
+                evidence / "questions",
+                evidence / "question_answers",
                 arguments.model,
                 arguments.reuse_answers,
                 problems,
             )
             try:
-                answer = read(response)
+                answer = model_client.parse_json_answer(
+                    model_client.answer_text(response)
+                )
             except model_client.ModelRefusedError as refusal:
-                answer = {field: None for field in ANSWER_FIELDS}
-                answer["problems"] = [str(refusal)]
+                answer, problems = {}, [str(refusal)]
             else:
-                answer["problems"] = check(answer, record)
-            problems = answer["problems"]
+                problems = check(question, answer)
             if not problems:
                 break
             if attempt + 1 <= arguments.corrections:
-                print(f"  {record['one']} & {record['other']}: {problems[0]}, asking again ...")
+                print(f"  {question['name']}: {problems[0]}, asking again ...")
 
-        held = (
-            f" {answer['whole']} holds it in {answer['field']}"
-            if answer["relation"] in (PART, CONTAINS, SUPPORTS)
-            else ""
-        )
-        print(
-            f"  {record['one']:<16} & {record['other']:<16} "
-            f"{str(answer['relation']):<12}{held}; faces -> {answer['owner']}"
-        )
-        for problem in answer["problems"]:
+        decided = {
+            "kind": question["kind"],
+            "name": question["name"],
+            "problems": list(problems),
+            "confidence": answer.get("confidence"),
+            "reason": answer.get("reason"),
+        }
+        if question["kind"] == "ownership":
+            decided.update(
+                pattern=question["pattern"],
+                owner=answer.get("owner"),
+                covers=question["covers"],
+            )
+            print(f"  {question['name']:<44} -> {decided['owner']}")
+        else:
+            decided.update(part=question["part"], whole=answer.get("whole"))
+            print(f"  {question['name']:<44} in {decided['whole']}")
+        for problem in decided["problems"]:
             print(f"      ! {problem}")
-        adjudicated.append(
-            {
-                "one": record["one"],
-                "other": record["other"],
-                "shared_faces": record["shared_faces"],
-                "status": record["status"],
-                **answer,
-            }
-        )
+        answered.append(decided)
 
     arguments.output.write_text(
         json.dumps(
-            {"model": arguments.model, "scene": relations["scene"], "pairs": adjudicated},
+            {
+                "model": arguments.model,
+                "scene": relations["scene"],
+                "answered": answered,
+                "settled": questions["settled"],
+                "forced": questions["forced"],
+            },
             indent=2,
         )
     )
 
-    counted = Counter(record["relation"] for record in adjudicated)
-    troubled = [record for record in adjudicated if record["problems"]]
-    print("\nwhat the pairs were answered as:")
-    for relation, count in counted.most_common():
-        print(f"  {str(relation):<14} {count}")
-    print(f"{len(troubled)} with problems; written to {arguments.output}")
+    counted = Counter(one["kind"] for one in answered)
+    troubled = [one for one in answered if one["problems"]]
+    print(
+        f"\n{counted['ownership']} patterns and {counted['membership']} memberships "
+        f"answered, {len(troubled)} with problems"
+    )
+    print(f"written to {arguments.output}")
 
 
 def main() -> None:
     """
-    Adjudicate the overlaps of the evidence run named on the command line.
+    Answer the open questions of the evidence run named on the command line.
     """
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -403,7 +336,7 @@ def main() -> None:
     parser.add_argument("--model", default=model_client.DEFAULT_MODEL,
                         help="Which model to ask.")
     parser.add_argument("--limit", type=int, default=0,
-                        help="Ask about only the first so many pairs.")
+                        help="Ask only the first so many questions.")
     parser.add_argument(
         "--corrections",
         type=int,
