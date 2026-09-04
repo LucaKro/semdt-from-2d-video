@@ -306,6 +306,21 @@ def open_questions(
                 "faces": [int(face) for face in exemplar.faces],
                 "covers": [group.to_json() for group in members],
                 "contested_faces": sum(len(group.faces) for group in members),
+                # How much of each claimant the contested faces are. Without it the
+                # picture is all a reader has, and a picture cannot be read when one
+                # claimant is twenty times the size of the others: the island label
+                # covers the whole block including its drawers, so a drawer front reads
+                # as a patch of detail on the island rather than as the drawer.
+                "shares": {
+                    name: {
+                        "faces": int(relations.descriptors[name].faces),
+                        "contested_share": round(
+                            len(exemplar.faces) / relations.descriptors[name].faces, 4
+                        ),
+                    }
+                    for name in exemplar.names
+                },
+                "exemplar_faces": int(len(exemplar.faces)),
                 "images": [],
             }
         )
@@ -354,6 +369,37 @@ def open_questions(
         "settled": settled,
         "forced": forced,
     }
+
+
+def carry_over_renders(path: Path, fresh: List[Dict[str, object]]) -> None:
+    """
+    Keep the renders a previous run made for the same questions.
+
+    A run that re-measures without re-rendering would otherwise write out questions with
+    no pictures, which reads as though the pictures were never made and quietly costs the
+    next step its evidence. A render is kept only where the question is the same one --
+    same name, same objects shown -- and the file is still on disk.
+
+    :param path: The file the previous run wrote.
+    :param fresh: The questions this run built, amended in place.
+    """
+    if not path.exists():
+        return
+    before = json.loads(path.read_text())
+    kept = {
+        (question["name"], tuple(question["shown"])): question
+        for section in ("ownership", "membership")
+        for question in before.get(section, [])
+        if question.get("images")
+    }
+    directory = path.parent / "questions"
+    for question in fresh:
+        earlier = kept.get((question["name"], tuple(question["shown"])))
+        if earlier is None:
+            continue
+        if all((directory / name).exists() for name in earlier["images"]):
+            question["images"] = earlier["images"]
+            question["legend"] = earlier.get("legend", {})
 
 
 def write_images(images: Dict[str, bytes], directory: Path, prefix: str) -> List[str]:
@@ -524,6 +570,9 @@ def build(arguments: argparse.Namespace) -> None:
             }
             print(f"  {question['name']}")
 
+    carry_over_renders(
+        output / "questions.json", questions["ownership"] + questions["membership"]
+    )
     for question in questions["ownership"] + questions["membership"]:
         question.pop("faces", None)
     (output / "questions.json").write_text(

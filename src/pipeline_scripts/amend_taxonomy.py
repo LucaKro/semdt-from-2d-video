@@ -414,6 +414,52 @@ def apply(accepted: List[Tuple[Candidate, SourceAmendment]]) -> None:
     if failure:
         undo(f"the ORM could not be regenerated:\n{failure}")
     print("the ORM was regenerated; the taxonomy is amended.")
+    print("run again with --revert when the run is done to put it back.")
+
+
+def revert(path: Path) -> None:
+    """
+    Put the taxonomy back the way it was.
+
+    An amendment is applied so that a run reads the ontology the run decided on, not so
+    that the ontology keeps it: the next scene should start from what was written by
+    hand, where a mixin one room talked a model into is not quietly in force. Every
+    applied edit is undone in reverse, and the ORM is rebuilt from the restored classes.
+
+    :param path: The amendments file written when they were applied.
+    :raises SystemExit: If nothing there was applied, or the ORM cannot be rebuilt.
+    """
+    records = json.loads(path.read_text())
+    applied = [record for record in records if record.get("applied")]
+    if not applied:
+        raise SystemExit(
+            f"nothing in {path} is applied, so there is nothing to put back"
+        )
+
+    known = annotation_classes(SemanticAnnotation)
+    print(f"putting back {len(applied)} amendment(s):")
+    for record in reversed(applied):
+        edit = record["edit"]
+        # before and after swapped, so applying this checks the file really holds the
+        # amended line before it undoes it.
+        SourceAmendment(
+            annotation_class=known[record["whole"]],
+            mixin=known[record["mixin"]],
+            path=Path(edit["file"]),
+            line_number=edit["line"],
+            before=edit["after"],
+            after=edit["before"],
+        ).apply()
+        record["applied"] = False
+        record["reverted"] = True
+        print(f"  {Path(edit['file']).name}:{edit['line']}  {edit['before']}")
+
+    print("regenerating the ORM ...")
+    failure = regenerate_orm()
+    if failure:
+        raise SystemExit(f"the ORM could not be regenerated:\n{failure}")
+    path.write_text(json.dumps(records, indent=2))
+    print("the taxonomy is back as it was written.")
 
 
 def build(arguments: argparse.Namespace) -> None:
@@ -502,6 +548,11 @@ def build(arguments: argparse.Namespace) -> None:
 
     print("\napplying:")
     apply(accepted)
+    written = {(candidate.whole, candidate.mixin) for candidate, _ in accepted}
+    for record in judged:
+        if (record["whole"], record["mixin"]) in written:
+            record["applied"] = True
+    (evidence / "taxonomy_amendments.json").write_text(json.dumps(judged, indent=2))
 
 
 def main() -> None:
@@ -522,6 +573,13 @@ def main() -> None:
         help="Edit the classes and regenerate the ORM, rather than only proposing it.",
     )
     parser.add_argument(
+        "--revert",
+        action="store_true",
+        help="Put back every amendment this evidence directory records as applied, and "
+        "rebuild the ORM. An amendment is applied for the length of a run, not kept: "
+        "the next scene should start from the taxonomy as it was written by hand.",
+    )
+    parser.add_argument(
         "--only",
         nargs="*",
         default=[],
@@ -538,7 +596,11 @@ def main() -> None:
         action="store_true",
         help="Read back the kept responses instead of asking again.",
     )
-    build(parser.parse_args())
+    arguments = parser.parse_args()
+    if arguments.revert:
+        revert(arguments.evidence_directory / "taxonomy_amendments.json")
+        return
+    build(arguments)
 
 
 if __name__ == "__main__":

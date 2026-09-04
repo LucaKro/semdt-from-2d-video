@@ -41,6 +41,10 @@ one the faces *are*: a drawer front is the drawer's surface even though the cabi
 sits in was labelled over it too, and a handle is the handle's even though it was
 labelled as the door it is screwed to.
 
+A label is often painted over a whole assembly, covering the parts mounted in it: the
+island label covers its own drawers and doors, so being the largest object claiming a set
+of faces says nothing about whether the faces are its.
+
 Answer for the kind of situation, not for this one room: the same answer will be used
 everywhere these labels meet like this.
 
@@ -117,10 +121,20 @@ def ownership_question(
     :return: The message, as :func:`model_client.ask` takes it.
     """
     covered = len(question["covers"])
+    # What the picture cannot say. One claimant is often many times the size of the
+    # others -- an island label covers the whole block including its drawers -- and then
+    # the contested faces read as a patch of detail on the big object rather than as the
+    # whole of the small one. The shares say which it is.
+    measured = "\n".join(
+        f"{name}: {share['faces']} faces in all, of which the contested "
+        f"{question['exemplar_faces']} are {share['contested_share']:.0%}"
+        for name, share in question.get("shares", {}).items()
+    )
     return [
         model_client.text_part(
             f"## The labels\n{', '.join(question['pattern'])}\n\n"
             f"## The picture\n{painted(question, labels)}\n\n"
+            f"## What was measured\n{measured}\n\n"
             f"## How often this happens\n"
             f"Objects with these labels are labelled over the same faces "
             f"{covered} time(s) in this room, {question['contested_faces']} faces in "
