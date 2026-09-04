@@ -30,6 +30,7 @@ import numpy as np
 from experiments.warsaw.world_loader import LabelSegment, WarsawWorldLoader
 
 from pipeline_scripts import model_client
+from pipeline_scripts.locations import TAXONOMY
 
 SYSTEM_PROMPT = """\
 You are naming objects in a scanned room, using an ontology of classes.
@@ -164,7 +165,7 @@ def build(arguments: argparse.Namespace) -> None:
     :param arguments: The command line arguments.
     """
     evidence = arguments.evidence_directory
-    taxonomy = json.loads((evidence / "taxonomy.json").read_text())
+    taxonomy = json.loads(TAXONOMY.read_text())
     vocabulary = json.loads((evidence / "vocabulary.json").read_text())
 
     loader = WarsawWorldLoader(input_directory=arguments.scene_directory)

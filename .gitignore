@@ -35,3 +35,6 @@ batch_output/
 .env
 env.sh
 cram-env
+# a run writes into a directory of its own; none of it belongs in the repository
+pipeline_runs/
+semdt_export/

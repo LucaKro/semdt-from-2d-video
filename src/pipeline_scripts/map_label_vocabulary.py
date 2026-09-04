@@ -38,6 +38,7 @@ from semantic_digital_twin.semantic_annotations.taxonomy_export import (
 from semantic_digital_twin.world_description.world_entity import SemanticAnnotation
 
 from pipeline_scripts import model_client
+from pipeline_scripts.locations import TAXONOMY
 
 SYSTEM_PROMPT = """\
 You name the segmentation labels of a scanned room in a robot's ontology.
@@ -102,14 +103,6 @@ ANSWER_FIELDS = ("class", "is_new_class", "superclass", "mixins", "confidence", 
 """
 What is kept of an answer, so a model's extra fields do not reach the file.
 """
-
-
-def taxonomy_of(evidence_directory: Path) -> Dict[str, Any]:
-    """
-    :param evidence_directory: Where the evidence run wrote its files.
-    :return: The taxonomy it exported.
-    """
-    return json.loads((evidence_directory / "taxonomy.json").read_text())
 
 
 def meetings(relations: Dict[str, Any], exemplar: str) -> str:
@@ -344,7 +337,7 @@ def build(arguments: argparse.Namespace) -> None:
     """
     evidence = arguments.evidence_directory
     request = json.loads((evidence / "vocabulary_request.json").read_text())
-    taxonomy = taxonomy_of(evidence)
+    taxonomy = json.loads(TAXONOMY.read_text())
     known = annotation_classes(SemanticAnnotation)
     mixins = [mixin["name"] for mixin in taxonomy["part_whole_mixins"]]
     building_blocks = [
@@ -360,13 +353,7 @@ def build(arguments: argparse.Namespace) -> None:
     labels = [entry["label"] for entry in request["labels"]]
     print(f"asking {arguments.model} about {len(entries)} of {len(labels)} labels ...")
 
-    # Asking about a few labels refines a mapping rather than replacing it, so what was
-    # answered about the others stays.
-    answered: Dict[str, Any] = (
-        json.loads(arguments.output.read_text())["labels"]
-        if arguments.output.exists()
-        else {}
-    )
+    answered: Dict[str, Any] = {}
     for entry in entries:
         problems: Sequence[str] = ()
         for attempt in range(1 + arguments.corrections):

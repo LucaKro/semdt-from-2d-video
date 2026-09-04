@@ -49,8 +49,9 @@ from semantic_digital_twin.semantic_annotations.taxonomy_export import (
     annotation_classes,
     compose_class,
     describe_class,
-    export_taxonomy,
 )
+
+from pipeline_scripts.locations import TAXONOMY, refuse_to_write_over
 from semantic_digital_twin.world_description.world_entity import SemanticAnnotation
 
 CLASS_UNKNOWN = "class-unknown"
@@ -449,37 +450,6 @@ def open_questions(
     }
 
 
-def carry_over_renders(path: Path, fresh: List[Dict[str, object]]) -> None:
-    """
-    Keep the renders a previous run made for the same questions.
-
-    A run that re-measures without re-rendering would otherwise write out questions with
-    no pictures, which reads as though the pictures were never made and quietly costs the
-    next step its evidence. A render is kept only where the question is the same one --
-    same name, same objects shown -- and the file is still on disk.
-
-    :param path: The file the previous run wrote.
-    :param fresh: The questions this run built, amended in place.
-    """
-    if not path.exists():
-        return
-    before = json.loads(path.read_text())
-    kept = {
-        (question["name"], tuple(question["shown"])): question
-        for section in ("ownership", "membership")
-        for question in before.get(section, [])
-        if question.get("images")
-    }
-    directory = path.parent / "questions"
-    for question in fresh:
-        earlier = kept.get((question["name"], tuple(question["shown"])))
-        if earlier is None:
-            continue
-        if all((directory / name).exists() for name in earlier["images"]):
-            question["images"] = earlier["images"]
-            question["legend"] = earlier.get("legend", {})
-
-
 def write_images(images: Dict[str, bytes], directory: Path, prefix: str) -> List[str]:
     """
     :param images: The renders to write, by viewpoint.
@@ -503,6 +473,7 @@ def build(arguments: argparse.Namespace) -> None:
     :param arguments: The command line arguments.
     """
     output = arguments.output_dir
+    refuse_to_write_over(output)
     output.mkdir(parents=True, exist_ok=True)
 
     loader = WarsawWorldLoader(
@@ -516,7 +487,9 @@ def build(arguments: argparse.Namespace) -> None:
     relations = segment_evidence(loader, nearest=arguments.nearest)
     print(f"{len(relations.pairs)} pairs stand in some measurable relation")
 
-    taxonomy = export_taxonomy(SemanticAnnotation, output / "taxonomy.json")
+    # Read rather than exported here: what the ontology holds is the same for every
+    # run, and prepare_run writes it out once, after putting the ontology back.
+    taxonomy = json.loads(TAXONOMY.read_text())
     known = annotation_classes(SemanticAnnotation)
     classes = classes_of_labels(
         json.loads(arguments.vocabulary.read_text()) if arguments.vocabulary else {},
@@ -648,9 +621,6 @@ def build(arguments: argparse.Namespace) -> None:
             }
             print(f"  {question['name']}")
 
-    carry_over_renders(
-        output / "questions.json", questions["ownership"] + questions["membership"]
-    )
     for question in questions["ownership"] + questions["membership"]:
         question.pop("faces", None)
     (output / "questions.json").write_text(
