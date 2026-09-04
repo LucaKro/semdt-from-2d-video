@@ -29,10 +29,16 @@ from pathlib import Path
 from typing import Dict, List, Optional, Type
 
 from experiments.warsaw.segment_relations import SegmentRelations, segment_evidence
-from experiments.warsaw.world_loader import LabelSegment, WarsawWorldLoader
+from experiments.warsaw.world_loader import (
+    VIEWPOINT_ALONE,
+    VIEWPOINT_IN_ROOM,
+    LabelSegment,
+    WarsawWorldLoader,
+)
 from semantic_digital_twin.semantic_annotations.part_whole import admissible_relations
 from semantic_digital_twin.world_description.geometry import Color
 from semantic_digital_twin.semantic_annotations.taxonomy_export import (
+    admissible_mounts,
     annotation_classes,
     compose_class,
     export_taxonomy,
@@ -66,6 +72,13 @@ def ontology_view(
     """
     Ask the ontology what two classes may be to one another.
 
+    The status is decided by the part-whole channel alone, because that is the one that
+    discriminates: ``contains`` is admissible between almost any two annotations, since
+    ``IsStorageSpace.objects`` accepts anything with a root body, so letting it decide
+    would report a relation for every pair in the room. The other channels are reported
+    beside it instead, since a mug on a counter and a jar in a box do stand in one, and
+    an adjudication told only about parts would force "part" onto them.
+
     ..note:: What comes back is what is *admissible*, never what is the case: whether
         this cabinet holds this drawer is a question about the two objects, which no
         amount of reading the taxonomy answers.
@@ -75,7 +88,7 @@ def ontology_view(
     :return: The admissible relations and what that leaves open.
     """
     if one_class is None or other_class is None:
-        return {"status": CLASS_UNKNOWN, "admissible": []}
+        return {"status": CLASS_UNKNOWN, "admissible": [], "other_mounts": []}
 
     relations = admissible_relations(one_class, other_class)
     admissible = [
@@ -94,7 +107,19 @@ def ontology_view(
         status = RELATION_KNOWN
     else:
         status = RELATION_AMBIGUOUS
-    return {"status": status, "admissible": admissible}
+
+    other_mounts = [
+        {
+            "kind": relation.kind,
+            "whole": whole.__name__,
+            "field": relation.field_name,
+            "target": relation.target,
+            "mounted_by": relation.mounted_by,
+        }
+        for whole, relation in admissible_mounts(one_class, other_class)
+        if relation.kind != "part"
+    ]
+    return {"status": status, "admissible": admissible, "other_mounts": other_mounts}
 
 
 def exemplars(relations: SegmentRelations) -> Dict[str, str]:
@@ -322,11 +347,13 @@ def build(arguments: argparse.Namespace) -> None:
     (output / "vocabulary_request.json").write_text(json.dumps(request, indent=2))
 
     if arguments.adjudication_renders:
-        undecided = [
-            record
-            for record in records
-            if record["status"] != RELATION_KNOWN and record["shared_faces"]
-        ][: arguments.adjudication_renders]
+        # Every pair sharing faces needs a picture, whatever the ontology made of it.
+        # Where it named a relation, which cabinet this drawer belongs to is still open;
+        # where it named none, the faces the two labels both claim still belong to one
+        # of them. Neither is a question the taxonomy can answer.
+        undecided = [record for record in records if record["shared_faces"]][
+            : arguments.adjudication_renders
+        ]
         print(f"rendering {len(undecided)} adjudications ...")
         for record in undecided:
             one, other = segments[record["one"]], segments[record["other"]]
@@ -426,10 +453,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--best-viewpoint",
-        action="store_true",
+        choices=(VIEWPOINT_IN_ROOM, VIEWPOINT_ALONE),
+        default=None,
         help="Keep only the viewpoint that shows the most of what is highlighted, "
         "measured by how much of the picture the highlight accounts for. Renders every "
-        "viewpoint to decide, so it costs the renders it then discards.",
+        "viewpoint to decide, so it costs the renders it then discards: 'in-room' draws "
+        "the whole scene each time and takes minutes per region, 'alone' draws only the "
+        "highlighted geometry and takes seconds, at the price of not counting what "
+        "stands in front of it.",
     )
     parser.add_argument(
         "--headless", action="store_true", help="Render without opening a window."
