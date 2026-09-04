@@ -224,7 +224,7 @@ When a scene has been split into rooms, `persist_annotations.py` accepts multipl
 ```bash
 python scripts/load_and_render_scene.py                 # list worlds in the DB
 python scripts/load_and_render_scene.py <world_name>    # render a persisted world
-python scripts/utils/inspect_camera_pose.py <obj_dir>   # interactive camera pose tuning
+python -m pipeline_scripts.utils.inspect_camera_pose <obj_dir>   # interactive camera pose tuning
 ```
 
 ### Evaluation & paper figures

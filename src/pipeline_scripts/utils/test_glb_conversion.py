@@ -4,7 +4,7 @@ from pathlib import Path
 import trimesh
 
 # Path to the GLB directory, relative to the repository this script lives in.
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[3]
 glb_base_dir = REPO_ROOT / "datasets" / "matterport3d" / "hm3d-minival-glb-v0.2"
 
 # Get the first available GLB file

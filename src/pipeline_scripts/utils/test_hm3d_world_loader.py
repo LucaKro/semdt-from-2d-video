@@ -21,7 +21,7 @@ import trimesh
 
 from semdt_2d_video.hm3d_world_loader import HM3DWorldLoader
 
-DATASETS = Path(__file__).resolve().parent.parent / "datasets" / "matterport3d"
+DATASETS = Path(__file__).resolve().parents[3] / "datasets" / "matterport3d"
 
 # Default scene: 00800-TEEsavR23oF (has semantic annotations)
 DEFAULT_SCENE_DIR = DATASETS / "hm3d-minival-semantic-annots-v0.2" / "00800-TEEsavR23oF"
