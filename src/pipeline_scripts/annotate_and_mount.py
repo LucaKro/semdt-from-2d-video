@@ -295,25 +295,39 @@ def main() -> None:
     for name, count in Counter(type(one).__name__ for one in annotations).most_common():
         print(f"  {{count:>4}} {{name}}")
 
+    plumbing = {{"root", "name", "id", "_world", "_semantic_annotations",
+                "simulator_additional_properties", "_inference_explanation_"}}
+
+    def holds_something(value) -> bool:
+        # Not `value not in (None, [], ())`: comparing an annotation against those
+        # sentinels calls its own __eq__, which hashes both sides, and a list is not
+        # hashable.
+        if value is None:
+            return False
+        if isinstance(value, (list, tuple, set, dict)):
+            return len(value) > 0
+        return True
+
     held = [
         (str(one.root.name.name), field, part)
         for one in annotations
         if getattr(one, "root", None)
         for field, part in vars(one).items()
-        if part not in (None, [], ()) and field not in ("root", "name", "id", "_world",
-                                              "_semantic_annotations",
-                                              "simulator_additional_properties",
-                                              "_inference_explanation_")
+        if field not in plumbing and holds_something(part)
     ]
     print()
     print(f"{{len(held)}} relations that hold something:")
     for whole, field, part in sorted(held)[:20]:
-        names = (
-            [str(one.root.name.name) for one in part]
-            if isinstance(part, list)
-            else str(getattr(part, "root", part))
+        def named(one) -> str:
+            root = getattr(one, "root", None)
+            return str(root.name.name) if root is not None else str(one)
+
+        shown = (
+            [named(one) for one in part]
+            if isinstance(part, (list, tuple, set))
+            else named(part)
         )
-        print(f"  {{whole}}.{{field}} = {{names}}")
+        print(f"  {{whole}}.{{field}} = {{shown}}")
 
     if arguments.view:
         # Smoothing recomputes vertex normals for a room's worth of geometry before the

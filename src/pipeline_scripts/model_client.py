@@ -107,6 +107,12 @@ def ask(
     payload = json.dumps(
         {
             "model": model,
+            # Every question here has one right answer and is asked once, so there is
+            # nothing for sampling to explore. It does not make a run repeatable --
+            # expert routing and batching still move under us -- but it removes the
+            # variance that is ours to remove, and this pipeline's answers did vary
+            # between runs on the borderline questions.
+            "temperature": 0,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": list(content)},
