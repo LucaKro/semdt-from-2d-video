@@ -40,6 +40,7 @@ from semantic_digital_twin.semantic_annotations.taxonomy_amendment import (
     amend_class_source,
     granting_mixins,
 )
+from semantic_digital_twin.semantic_annotations.part_whole import part_whole_fields
 from semantic_digital_twin.semantic_annotations.taxonomy_export import (
     annotation_classes,
     build_taxonomy,
@@ -62,6 +63,9 @@ the pictures. Say yes only if a thing of the first class can, in general, have a
 the second as one of its structural parts.
 
 Say no if:
+- the part can already be reached through something the class holds, in which case the
+  paths are listed for you: a field of its own would let it mount beside the thing it is
+  really a part of,
 - the objects would be better served by a class of their own that has the mixin,
 - the overlap is something other than a part: resting on it, stored inside it, or two
   labels covering the same surface,
@@ -194,6 +198,39 @@ def describe(annotation_class: Type) -> str:
     return "\n".join(lines)
 
 
+def paths_to(whole: Type, part: Type, maximum_depth: int = 3) -> List[str]:
+    """
+    Report how a part can already be reached from a class through what it holds.
+
+    This is what makes a proposal redundant rather than wrong: a cabinet holds doors and
+    a door holds a handle, so a cabinet reaches a handle without declaring one, and
+    giving it a field of its own would let a handle mount onto the carcass and skip the
+    door it is actually on. Without these paths the question cannot be answered, since
+    the reason to say no is one relation further away than the class itself.
+
+    :param whole: The class to search from.
+    :param part: The class to reach.
+    :param maximum_depth: How many relations a path may be long.
+    :return: One rendered path per way of reaching it, empty when there is none.
+    """
+    found: List[str] = []
+    frontier = [(whole, whole.__name__, {whole})]
+    for _ in range(maximum_depth):
+        onwards = []
+        for current, rendered, seen in frontier:
+            for relation in part_whole_fields(current):
+                target = relation.part
+                if not isinstance(target, type):
+                    continue
+                path = f"{rendered} -> {relation.field_name} -> {target.__name__}"
+                if issubclass(part, target):
+                    found.append(path)
+                elif target not in seen:
+                    onwards.append((target, path, seen | {target}))
+        frontier = onwards
+    return found
+
+
 def question_for(
     candidate: Candidate,
     known: Dict[str, Type],
@@ -221,6 +258,20 @@ def question_for(
         for relation in introduces
         if relation["kind"] == "part"
     )
+    # Said only when there is something to say. Reporting that no path was found puts
+    # the absence of a reason to refuse where a reason to accept would go, and it gets
+    # read as one: it turned four refusals into acceptances, one of them a Handle that
+    # would hold Doors.
+    reachable = paths_to(known[candidate.whole], known[candidate.part])
+    already = (
+        f"## How a {candidate.part} can already be reached\n"
+        + "\n".join(reachable)
+        + "\nA part reachable through something the class already holds needs no field "
+        "of its own: mounting it directly onto the class would put it beside the thing "
+        "it is really a part of.\n\n"
+        if reachable
+        else ""
+    )
     content = [
         model_client.text_part(
             f"## The proposal\n"
@@ -228,6 +279,7 @@ def question_for(
             f"{granted}.\n\n"
             f"## The class as it stands\n{describe(known[candidate.whole])}\n\n"
             f"## The part\n{describe(known[candidate.part])}\n\n"
+            f"{already}"
             f"## What was measured\n"
             f"In one scanned room, objects labelled "
             f"{', '.join(sorted(candidate.whole_labels))} were read as "
