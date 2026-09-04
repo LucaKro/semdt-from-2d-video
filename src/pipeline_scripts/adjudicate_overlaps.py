@@ -109,6 +109,41 @@ def painted(question: Dict[str, Any], labels: Dict[str, str]) -> str:
     return "\n".join(lines)
 
 
+def ontology(question: Dict[str, Any]) -> str:
+    """
+    :param question: The question, as ``questions.json`` holds it.
+    :return: What the taxonomy holds about the objects in it, as a model reads it.
+    """
+    known = question.get("ontology")
+    if not known:
+        return ""
+    read_as = "\n".join(
+        f"{name} was read as {class_name or 'no class'}"
+        for name, class_name in known["read_as"].items()
+    )
+    lines = [f"## What the ontology says\n{read_as}"]
+    if known["classes"]:
+        lines.append("\n".join(known["classes"]))
+    lines.append(
+        "\n".join(known["admits"])
+        if known["admits"]
+        else "Between these classes it admits no mount at all."
+    )
+    return "\n\n".join(lines)
+
+
+def measured(question: Dict[str, Any]) -> str:
+    """
+    :param question: The question, as ``questions.json`` holds it.
+    :return: What was measured of each object on its own.
+    """
+    return "\n".join(
+        f"{name}: {one['faces']} faces, {one['area']} m2, "
+        f"middle {one['height']} m up, {one['pieces']} piece(s)"
+        for name, one in question.get("measured", {}).items()
+    )
+
+
 def ownership_question(
     question: Dict[str, Any], labels: Dict[str, str], images: Path
 ) -> List[Dict[str, Any]]:
@@ -125,16 +160,17 @@ def ownership_question(
     # others -- an island label covers the whole block including its drawers -- and then
     # the contested faces read as a patch of detail on the big object rather than as the
     # whole of the small one. The shares say which it is.
-    measured = "\n".join(
-        f"{name}: {share['faces']} faces in all, of which the contested "
-        f"{question['exemplar_faces']} are {share['contested_share']:.0%}"
+    shares = "\n".join(
+        f"of {name} the contested {question['exemplar_faces']} faces are "
+        f"{share['contested_share']:.0%}"
         for name, share in question.get("shares", {}).items()
     )
     return [
         model_client.text_part(
             f"## The labels\n{', '.join(question['pattern'])}\n\n"
+            f"{ontology(question)}\n\n"
             f"## The picture\n{painted(question, labels)}\n\n"
-            f"## What was measured\n{measured}\n\n"
+            f"## What was measured\n{measured(question)}\n{shares}\n\n"
             f"## How often this happens\n"
             f"Objects with these labels are labelled over the same faces "
             f"{covered} time(s) in this room, {question['contested_faces']} faces in "
@@ -154,16 +190,19 @@ def membership_question(
     :param images: The directory holding its renders.
     :return: The message, as :func:`model_client.ask` takes it.
     """
-    measured = "\n".join(
-        f"{name}: shares {how['shared_faces']} faces with it, and would hold it in "
-        f"its {how['field']}"
+    candidates = "\n".join(
+        f"{name}: shares {how['shared_faces']} faces with it, touches it along "
+        f"{how['touching_edges']} edges, {how['distance']} m between their surfaces, "
+        f"and would hold it in its {how['field']}"
         for name, how in question["candidates"].items()
     )
     return [
         model_client.text_part(
             f"## The part\n{question['part']}, labelled "
             f"\"{labels[question['part']]}\"\n\n"
-            f"## The candidates\n{measured}\n\n"
+            f"{ontology(question)}\n\n"
+            f"## What was measured\n{measured(question)}\n\n"
+            f"## The candidates\n{candidates}\n\n"
             f"## The picture\n{painted(question, labels)}"
         )
     ] + pictures(question, images)

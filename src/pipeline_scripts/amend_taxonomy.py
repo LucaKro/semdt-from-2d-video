@@ -44,7 +44,7 @@ from semantic_digital_twin.semantic_annotations.part_whole import part_whole_fie
 from semantic_digital_twin.semantic_annotations.taxonomy_export import (
     annotation_classes,
     build_taxonomy,
-    relations_of,
+    describe_class,
 )
 from semantic_digital_twin.world_description.world_entity import SemanticAnnotation
 
@@ -181,21 +181,6 @@ def candidates(
     return sorted(gathered.values(), key=lambda one: -one.pairs)
 
 
-def describe(annotation_class: Type) -> str:
-    """
-    :param annotation_class: The class to describe.
-    :return: Its declaration and what it can hold, as a model reads it.
-    """
-    bases = ", ".join(base.__name__ for base in annotation_class.__bases__)
-    lines = [f"{annotation_class.__name__}({bases})"]
-    for relation in relations_of(annotation_class):
-        many = " (many)" if relation.holds_many else ""
-        lines.append(
-            f"  {relation.kind} {relation.field_name} -> {relation.target}{many}"
-        )
-    return "\n".join(lines)
-
-
 def held_parts(annotation_class: Type) -> List[Type]:
     """
     Report the classes a class can hold as structural parts.
@@ -242,7 +227,7 @@ def question_for(
     # relation further away and often decides it -- a cabinet holds doors and a door
     # holds a handle. Reported as structure and nothing else: what follows from it is
     # the question being asked, not something to answer in the asking.
-    onwards = [describe(held) for held in held_parts(known[candidate.whole])]
+    onwards = [describe_class(held) for held in held_parts(known[candidate.whole])]
     already = (
         "## What those parts hold in turn\n" + "\n".join(onwards) + "\n\n"
         if onwards
@@ -253,8 +238,8 @@ def question_for(
             f"## The proposal\n"
             f"Give {candidate.whole} the mixin {candidate.mixin}, which introduces: "
             f"{granted}.\n\n"
-            f"## The class as it stands\n{describe(known[candidate.whole])}\n\n"
-            f"## The part\n{describe(known[candidate.part])}\n\n"
+            f"## The class as it stands\n{describe_class(known[candidate.whole])}\n\n"
+            f"## The part\n{describe_class(known[candidate.part])}\n\n"
             f"{already}"
             f"## What was measured\n"
             f"In one scanned room, objects labelled "

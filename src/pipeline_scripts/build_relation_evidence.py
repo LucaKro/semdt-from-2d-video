@@ -27,7 +27,7 @@ import json
 from collections import Counter, defaultdict
 from itertools import combinations
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Dict, List, Optional, Sequence, Tuple, Type
 
 import numpy as np
 
@@ -48,6 +48,7 @@ from semantic_digital_twin.semantic_annotations.taxonomy_export import (
     admissible_mounts,
     annotation_classes,
     compose_class,
+    describe_class,
     export_taxonomy,
 )
 from semantic_digital_twin.world_description.world_entity import SemanticAnnotation
@@ -246,10 +247,80 @@ def group_highlights(
     return highlights, legend
 
 
+def ontology_around(
+    names: Sequence[str],
+    labels: Dict[str, str],
+    classes: Dict[str, Optional[Type]],
+) -> Dict[str, object]:
+    """
+    Say what the taxonomy holds about a handful of objects.
+
+    The questions about a set of objects were asked with the pictures and the
+    measurements alone, and the ontology already knows things that bear on them: that a
+    cabinet can hold a drawer says the drawer is the finer of the two, which is exactly
+    what "whose surface is this" turns on. What is reported is the slice about these
+    classes rather than the whole taxonomy, since a question about three objects is not
+    helped by a hundred and thirty-nine classes.
+
+    :param names: The segments in question.
+    :param labels: Per segment, the label it carries.
+    :param classes: Per label, the class it was read as.
+    :return: Per segment its class, each class written out, and what the ontology admits
+        between each pair of them.
+    """
+    read_as = {name: classes.get(labels[name]) for name in names}
+    admits = []
+    for one, other in combinations(names, 2):
+        for whole, relation in admissible_mounts(read_as[one], read_as[other]) if (
+            read_as[one] is not None and read_as[other] is not None
+        ) else []:
+            admits.append(
+                f"{whole.__name__}.{relation.field_name} may hold a "
+                f"{relation.target} ({relation.kind}, mounted with "
+                f"{relation.mounted_by}())"
+            )
+    return {
+        "read_as": {
+            name: getattr(annotation_class, "__name__", None)
+            for name, annotation_class in read_as.items()
+        },
+        "classes": [
+            describe_class(annotation_class)
+            for annotation_class in dict.fromkeys(
+                one for one in read_as.values() if one is not None
+            )
+        ],
+        # The same mount turns up once per pair that could use it, and almost every
+        # class has objects -> HasRootBody, so without this the list reads as though
+        # containment were being urged six times over.
+        "admits": list(dict.fromkeys(admits)),
+    }
+
+
+def measured_of(
+    names: Sequence[str], relations: SegmentRelations
+) -> Dict[str, Dict[str, object]]:
+    """
+    :param names: The segments in question.
+    :param relations: The measured scene.
+    :return: Per segment, what was measured of it on its own.
+    """
+    return {
+        name: {
+            "faces": int(relations.descriptors[name].faces),
+            "area": round(relations.descriptors[name].area, 3),
+            "height": round(relations.descriptors[name].height, 2),
+            "pieces": int(relations.descriptors[name].components),
+        }
+        for name in names
+    }
+
+
 def open_questions(
     loader: WarsawWorldLoader,
     relations: SegmentRelations,
     records: List[Dict[str, object]],
+    classes: Dict[str, Optional[Type]],
 ) -> Dict[str, List[Dict[str, object]]]:
     """
     Work out what is actually left to decide, and how few questions it takes.
@@ -268,6 +339,7 @@ def open_questions(
     :param loader: The loaded scene.
     :param relations: The measured scene.
     :param records: The pairs, as they were written out.
+    :param classes: Per label, the class it was read as.
     :return: The ownership questions, the membership questions, and the groups that need
         neither.
     """
@@ -321,6 +393,8 @@ def open_questions(
                     for name in exemplar.names
                 },
                 "exemplar_faces": int(len(exemplar.faces)),
+                "ontology": ontology_around(exemplar.names, labels, classes),
+                "measured": measured_of(exemplar.names, relations),
                 "images": [],
             }
         )
@@ -342,6 +416,8 @@ def open_questions(
         candidates[part][whole] = {
             "field": admitted["field"],
             "shared_faces": record["shared_faces"],
+            "touching_edges": record["touching_edges"],
+            "distance": record["distance"],
         }
 
     membership = [
@@ -352,6 +428,8 @@ def open_questions(
             "shown": [part] + sorted(wholes),
             "faces": [],
             "candidates": {name: how for name, how in sorted(wholes.items())},
+            "ontology": ontology_around([part] + sorted(wholes), labels, classes),
+            "measured": measured_of([part] + sorted(wholes), relations),
             "images": [],
         }
         for part, wholes in sorted(candidates.items())
@@ -533,7 +611,7 @@ def build(arguments: argparse.Namespace) -> None:
 
     (output / "vocabulary_request.json").write_text(json.dumps(request, indent=2))
 
-    questions = open_questions(loader, relations, records)
+    questions = open_questions(loader, relations, records, classes)
     print(
         f"\n{len(questions['ownership'])} class patterns and "
         f"{len(questions['membership'])} memberships are open; "

@@ -142,9 +142,10 @@ def ask(
 def answer_text(response: Dict[str, Any]) -> str:
     """
     :param response: What :func:`ask` returned.
-    :return: What the model said.
+    :return: What the model said, empty where it said nothing -- a reply can carry a
+        null content, and a caller reading it as text should get text.
     """
-    return response["choices"][0]["message"]["content"]
+    return response["choices"][0]["message"].get("content") or ""
 
 
 def parse_json_answer(answer: str) -> Any:
@@ -156,8 +157,11 @@ def parse_json_answer(answer: str) -> Any:
 
     :param answer: What the model said.
     :return: The JSON object or array in it.
-    :raises ModelRefusedError: If there is none.
+    :raises ModelRefusedError: If there is none, an empty reply included: a model that
+        answers with nothing has refused as surely as one that answers with prose.
     """
+    if not answer or not answer.strip():
+        raise ModelRefusedError(answer or "")
     try:
         return json.loads(answer)
     except json.JSONDecodeError:
