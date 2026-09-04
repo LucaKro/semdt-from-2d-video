@@ -100,8 +100,11 @@ def exemplars(relations: SegmentRelations) -> Dict[str, str]:
     """
     Pick the instance of each label that shows the label best.
 
-    The instance whose faces the fewest other segments also claim is the one a viewer can
-    judge without judging the overlap at the same time.
+    The one with the most surface no other segment claims is the one a viewer can judge
+    without judging an overlap at the same time. Ranking by the *share* instead picks
+    slivers, which are wholly unclaimed precisely because they are fragments: on this
+    scene it offered a strip of 545 faces as the example of a cabinet while a whole
+    cabinet front of 960 stood beside it, equally unclaimed.
 
     :param relations: The measured scene.
     :return: Per label, the name of the segment standing for it.
@@ -110,8 +113,8 @@ def exemplars(relations: SegmentRelations) -> Dict[str, str]:
     for descriptor in relations.descriptors.values():
         standing = best.get(descriptor.class_name)
         if standing is None or (
-            descriptor.exclusive_share
-            > relations.descriptors[standing].exclusive_share
+            descriptor.exclusive_area
+            > relations.descriptors[standing].exclusive_area
         ):
             best[descriptor.class_name] = descriptor.name
     return best
@@ -216,6 +219,9 @@ def build(arguments: argparse.Namespace) -> None:
                 "exemplar_exclusive_share": round(
                     relations.descriptors[name].exclusive_share, 4
                 ),
+                "exemplar_exclusive_area": round(
+                    relations.descriptors[name].exclusive_area, 4
+                ),
                 "images": [],
             }
             for label, name in sorted(standing_for.items())
@@ -233,6 +239,7 @@ def build(arguments: argparse.Namespace) -> None:
                     [(color, segment.faces)],
                     viewpoints=arguments.viewpoints,
                     headless=arguments.headless,
+                    choose_viewpoint=arguments.best_viewpoint,
                 ),
                 output / "exemplars",
                 entry["label"],
@@ -258,6 +265,7 @@ def build(arguments: argparse.Namespace) -> None:
                     highlights,
                     viewpoints=arguments.viewpoints,
                     headless=arguments.headless,
+                    choose_viewpoint=arguments.best_viewpoint,
                 ),
                 output / "adjudications",
                 f"{record['one']}__{record['other']}",
@@ -338,6 +346,13 @@ def main() -> None:
         default=(1024, 768),
         metavar=("WIDTH", "HEIGHT"),
         help="Size of the rendered images (default: 1024 768).",
+    )
+    parser.add_argument(
+        "--best-viewpoint",
+        action="store_true",
+        help="Keep only the viewpoint that shows the most of what is highlighted, "
+        "measured by how much of the picture the highlight accounts for. Renders every "
+        "viewpoint to decide, so it costs the renders it then discards.",
     )
     parser.add_argument(
         "--headless", action="store_true", help="Render without opening a window."
