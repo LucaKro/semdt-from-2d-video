@@ -53,19 +53,25 @@ def new_run_directory(runs_directory: Path = RUNS_DIRECTORY) -> Path:
     return directory
 
 
-def refuse_to_write_over(directory: Path) -> None:
+def refuse_to_write_over(directory: Path, overwrite: bool = False) -> None:
     """
-    Refuse to write a run's output where another run's already is.
+    Refuse to write a run's output where output already is, unless told to override it.
 
     Writing beside it is how a run comes to be part one run and part another: the files
     it does not happen to rewrite stay as the last run left them, and nothing says so.
+    Overriding is another matter and is allowed when asked for -- a step run twice in
+    one run, the second time knowing something the first did not, writes what it wrote
+    again rather than adding to it.
 
     :param directory: Where the run means to write.
-    :raises SystemExit: If anything is there already.
+    :param overwrite: Whether what is there is to be written over.
+    :raises SystemExit: If anything is there and overwriting was not asked for.
     """
     directory = Path(directory)
-    if directory.exists() and any(directory.iterdir()):
-        raise SystemExit(
-            f"{directory} already holds a run's output. Give an empty directory, or "
-            f"make one with:\n    python -m pipeline_scripts.prepare_run"
-        )
+    if overwrite or not directory.exists() or not any(directory.iterdir()):
+        return
+    raise SystemExit(
+        f"{directory} already holds output. Write into an empty directory made with:"
+        f"\n    python -m pipeline_scripts.prepare_run"
+        f"\nor pass --overwrite to write over what is there."
+    )

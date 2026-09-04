@@ -39,6 +39,7 @@ from semantic_digital_twin.semantic_annotations.in_memory_builder import (
 )
 from semantic_digital_twin.semantic_annotations.taxonomy_export import (
     annotation_classes,
+    in_base_order,
 )
 from semantic_digital_twin.world_description.world_entity import SemanticAnnotation
 
@@ -48,20 +49,45 @@ What a generated class is written from.
 """
 
 
-def wanted_classes(classifications: Dict[str, Any]) -> Dict[str, str]:
+def wanted_classes(
+    classifications: Dict[str, Any], vocabulary: Dict[str, Any]
+) -> Dict[str, List[str]]:
     """
+    Say what each class a body was given should be built from.
+
+    Two steps proposed compositions and only one of them was asked to. The vocabulary
+    step answers what a *label* means and names a superclass and the mixins to compose
+    it from, having been shown what objects of that label were measured to meet; the
+    classification step answers which class each *object* is, from a picture, and its
+    schema carries a superclass as well. Read from the classification alone, a Faucet
+    that the vocabulary had composed with HasHandle comes out with no way to hold a
+    handle at all, and the pairing measured for it cannot be mounted.
+
+    So the bases come from the vocabulary where it composed that class, and from the
+    classification only where it did not.
+
     :param classifications: What the classification step wrote.
-    :return: Per class name a body was given, the superclass proposed for it.
+    :param vocabulary: What the vocabulary step wrote.
+    :return: Per class name, the names of the classes to derive it from.
     """
-    wanted: Dict[str, str] = {}
+    composed = {
+        answer["class"]: [answer["superclass"]] + list(answer.get("mixins") or [])
+        for answer in vocabulary["labels"].values()
+        if answer.get("class") and answer.get("is_new_class") and answer.get("superclass")
+    }
+
+    wanted: Dict[str, List[str]] = {}
     for answer in classifications["bodies"].values():
         name = answer.get("class")
-        if name and name not in wanted:
-            wanted[name] = answer.get("superclass") or "SemanticAnnotation"
+        if not name or name in wanted:
+            continue
+        wanted[name] = composed.get(
+            name, [answer.get("superclass") or "SemanticAnnotation"]
+        )
     return wanted
 
 
-def generate_missing(wanted: Dict[str, str], known: Dict[str, Type]) -> List[str]:
+def generate_missing(wanted: Dict[str, List[str]], known: Dict[str, Type]) -> List[str]:
     """
     Write the classes a scene needs that the taxonomy does not have.
 
@@ -69,27 +95,28 @@ def generate_missing(wanted: Dict[str, str], known: Dict[str, Type]) -> List[str
     reset empties between runs: a class one scene needed is not a class the next one
     starts with.
 
-    :param wanted: Per class name, the superclass proposed for it.
+    :param wanted: Per class name, the names of the classes to derive it from.
     :param known: The taxonomy's classes by name.
     :return: The names that were generated.
     """
     builders, generated = [], []
-    for name, superclass_name in sorted(wanted.items()):
+    for name, base_names in sorted(wanted.items()):
         if name in known:
             continue
-        superclass = known.get(superclass_name)
-        if superclass is None:
-            print(
-                f"  {name}: {superclass_name} is not in the taxonomy, "
-                f"deriving from SemanticAnnotation"
-            )
-            superclass = SemanticAnnotation
-        builders.append(
-            SemanticAnnotationClassBuilder(name, template_name=TEMPLATE).add_base(
-                superclass
-            )
-        )
-        generated.append(f"{name}({superclass.__name__})")
+        bases = [known[one] for one in base_names if one in known]
+        for missing in [one for one in base_names if one not in known]:
+            print(f"  {name}: {missing} is not in the taxonomy, leaving it out")
+        if not bases:
+            bases = [SemanticAnnotation]
+
+        # Ordered as a class must declare them, since a proposal naming HasRootBody
+        # beside IsStorageSpace -- which derives from it -- names them the wrong way
+        # round for Python.
+        builder = SemanticAnnotationClassBuilder(name, template_name=TEMPLATE)
+        for base in in_base_order(bases):
+            builder.add_base(base)
+        builders.append(builder)
+        generated.append(f"{name}({', '.join(base.__name__ for base in in_base_order(bases))})")
 
     if builders:
         SemanticAnnotationClassBuilder.write_classes_to_file(
@@ -218,6 +245,186 @@ def mount(arguments: argparse.Namespace) -> None:
     record["annotated_world_db_id"] = annotated_id
     (evidence / "split.json").write_text(json.dumps(record, indent=2))
 
+    (evidence / "inspect_world.py").write_text(
+        INSPECTOR.format(annotated=annotated_id, split=world_db_id)
+    )
+    (evidence / "report.md").write_text(report(evidence, annotated_id, world_db_id))
+    print(f"written to {evidence / 'report.md'} and {evidence / 'inspect_world.py'}")
+
+
+INSPECTOR = '''"""
+Open the world this run built.
+
+    python inspect_world.py            # what the world holds
+    python inspect_world.py --view     # and look at it
+
+Written by the run that built it, so the id is the one it was written under.
+"""
+
+import argparse
+from collections import Counter
+
+from semantic_digital_twin.orm.ormatic_interface import WorldMappingDAO
+from semantic_digital_twin.orm.utils import semantic_digital_twin_sessionmaker
+from semantic_digital_twin.spatial_computations.raytracer import RayTracer
+from sqlalchemy.orm import Session
+
+ANNOTATED_WORLD = {annotated}
+SPLIT_WORLD = {split}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--world-db-id", type=int, default=ANNOTATED_WORLD,
+                        help=f"Which world to open ({{ANNOTATED_WORLD}} annotated, "
+                             f"{{SPLIT_WORLD}} as it was split).")
+    parser.add_argument("--view", action="store_true",
+                        help="Open it in the viewer; close the window to finish.")
+    arguments = parser.parse_args()
+
+    engine = semantic_digital_twin_sessionmaker()().bind
+    with Session(engine) as session:
+        stored = session.get(WorldMappingDAO, arguments.world_db_id)
+        if stored is None:
+            raise SystemExit(f"no world in the database with id {{arguments.world_db_id}}")
+        world = stored.from_dao()
+
+    annotations = list(world.semantic_annotations)
+    print(f"world {{arguments.world_db_id}}: {{len(world.bodies)}} bodies, "
+          f"{{len(annotations)}} annotations")
+    for name, count in Counter(type(one).__name__ for one in annotations).most_common():
+        print(f"  {{count:>4}} {{name}}")
+
+    held = [
+        (str(one.root.name.name), field, part)
+        for one in annotations
+        if getattr(one, "root", None)
+        for field, part in vars(one).items()
+        if part not in (None, [], ()) and field not in ("root", "name", "id", "_world",
+                                              "_semantic_annotations",
+                                              "simulator_additional_properties",
+                                              "_inference_explanation_")
+    ]
+    print()
+    print(f"{{len(held)}} relations that hold something:")
+    for whole, field, part in sorted(held)[:20]:
+        names = (
+            [str(one.root.name.name) for one in part]
+            if isinstance(part, list)
+            else str(getattr(part, "root", part))
+        )
+        print(f"  {{whole}}.{{field}} = {{names}}")
+
+    if arguments.view:
+        # Smoothing recomputes vertex normals for a room's worth of geometry before the
+        # first frame, which is minutes of an apparently black window.
+        RayTracer(world=world).scene.show(smooth=False, resolution=(1280, 960))
+
+
+if __name__ == "__main__":
+    main()
+'''
+"""
+The script a run leaves behind so its world can be opened without knowing anything.
+"""
+
+
+def report(evidence: Path, annotated_id: int, split_id: int) -> str:
+    """
+    Say what the run made, from what its steps wrote.
+
+    A run's numbers are spread over six files and a terminal that has scrolled away, and
+    the question asked of a run afterwards is usually how much of it went through rather
+    than what any one step said.
+
+    :param evidence: The run's directory.
+    :param annotated_id: The world the annotations were written to.
+    :param split_id: The world it was built from.
+    :return: The report, as Markdown.
+    """
+
+    def held(name: str) -> Dict[str, Any]:
+        path = evidence / name
+        return json.loads(path.read_text()) if path.exists() else {}
+
+    relations = held("relations.json")
+    questions = held("questions.json")
+    vocabulary = held("vocabulary.json")
+    adjudications = held("adjudications.json")
+    split = held("split.json")
+    classifications = held("classifications.json")
+
+    overlapping = [
+        pair for pair in relations.get("pairs", []) if pair.get("shared_faces")
+    ]
+    labels = vocabulary.get("labels", {})
+    bodies = classifications.get("bodies", {})
+    answered = adjudications.get("answered", [])
+
+    lines = [
+        f"# {evidence.name}",
+        "",
+        f"- scene: `{relations.get('scene', 'unknown')}`",
+        f"- worlds: **{annotated_id}** annotated, {split_id} as it was split",
+        f"- models: {vocabulary.get('model', '?')} (vocabulary), "
+        f"{adjudications.get('model', '?')} (adjudication), "
+        f"{classifications.get('model', '?')} (classification)",
+        "",
+        "## What was measured",
+        "",
+        f"- {len(relations.get('segments', []))} labelled objects over "
+        f"{len(relations.get('pairs', []))} measurable pairs, {len(overlapping)} of "
+        f"them sharing faces",
+        f"- {len(questions.get('settled', []))} sets of contested faces the ontology "
+        f"settled, {len(questions.get('forced', []))} memberships with only one "
+        f"candidate",
+        "",
+        "## What was asked",
+        "",
+        f"- {len(labels)} labels, "
+        f"{sum(1 for one in labels.values() if one.get('class'))} mapped to a class, "
+        f"{sum(1 for one in labels.values() if one.get('is_new_class'))} of them new",
+        f"- {sum(1 for one in answered if one['kind'] == 'ownership')} class patterns "
+        f"and {sum(1 for one in answered if one['kind'] == 'membership')} memberships "
+        f"adjudicated, {sum(1 for one in answered if one.get('problems'))} with problems",
+        f"- {len(bodies)} bodies named, "
+        f"{len({one['class'] for one in bodies.values() if one.get('class')})} distinct "
+        f"classes",
+        "",
+        "## What was built",
+        "",
+        f"- {len(split.get('bodies', {}))} bodies, "
+        f"{sum(one['faces'] for one in split.get('bodies', {}).values())} faces between "
+        f"them, {split.get('still_contested', 0)} faces still claimed twice",
+        f"- {len(split.get('pairings', []))} pairings carried past the split",
+    ]
+
+    emptied = split.get("emptied", {})
+    if emptied:
+        lines += ["", f"### {len(emptied)} objects lost every face", ""]
+        for name, took in sorted(emptied.items()):
+            whom = ", ".join(f"{who} ({count})" for who, count in took.items())
+            lines.append(f"- `{name}` -> {whom}")
+
+    if bodies:
+        lines += ["", "### Classes given", ""]
+        for name, count in Counter(
+            one["class"] for one in bodies.values() if one.get("class")
+        ).most_common():
+            lines.append(f"- {count} x `{name}`")
+
+    lines += [
+        "",
+        "## Looking at it",
+        "",
+        "```",
+        "python inspect_world.py          # what the world holds",
+        "python inspect_world.py --view   # and look at it",
+        "```",
+        "",
+    ]
+    return "\n".join(lines)
+
 
 def build(arguments: argparse.Namespace) -> None:
     """
@@ -227,7 +434,8 @@ def build(arguments: argparse.Namespace) -> None:
     """
     evidence = arguments.evidence_directory
     classifications = json.loads((evidence / "classifications.json").read_text())
-    wanted = wanted_classes(classifications)
+    vocabulary = json.loads((evidence / "vocabulary.json").read_text())
+    wanted = wanted_classes(classifications, vocabulary)
     known = annotation_classes(SemanticAnnotation)
     print(f"{len(wanted)} classes over {len(classifications['bodies'])} bodies")
 

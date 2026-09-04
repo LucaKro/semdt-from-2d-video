@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 from typing import List
 
+import semantic_digital_twin
 from semantic_digital_twin.semantic_annotations.in_memory_builder import (
     SemanticAnnotationFilePaths,
 )
@@ -84,6 +85,41 @@ def reset_generated_classes(repository: Path) -> None:
         )
 
 
+def regenerate_orm() -> None:
+    """
+    Rebuild the ORM from the classes that are left.
+
+    The reset writes the stub and stops there -- it says so, and the documented way to
+    use it is to regenerate afterwards. Left out, the ORM goes on naming classes that
+    were just removed and the first step to import it dies on a class that is not there.
+    It is also the only way to check: the generated interface is gitignored, so a clean
+    checkout says nothing at all about whether it matches the ontology.
+
+    :raises SystemExit: If the rebuild fails.
+    """
+    root = Path(semantic_digital_twin.__file__).parent
+    script = root.parent.parent / "scripts" / "generate_orm.py"
+    interface = root / "orm" / "ormatic_interface.py"
+
+    # The generator reads the interface it is about to replace, and the one standing
+    # there still names the classes just removed -- so it cannot be imported and the
+    # rebuild dies on the very staleness it was run to cure. Moved aside, the generator
+    # builds from the ontology alone; put back if it fails, so a failure costs nothing.
+    aside = interface.with_suffix(".py.aside")
+    if interface.exists():
+        interface.replace(aside)
+    finished = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True
+    )
+    if finished.returncode != 0 or not interface.exists():
+        if aside.exists():
+            aside.replace(interface)
+        raise SystemExit(
+            f"the ORM could not be rebuilt:\n{finished.stderr.strip()[-2000:]}"
+        )
+    aside.unlink(missing_ok=True)
+
+
 def export_ontology() -> None:
     """
     Write out what every run is allowed to read: the taxonomy as a model reads it.
@@ -140,6 +176,9 @@ def build(arguments: argparse.Namespace) -> None:
     print("emptying the classes generated for an earlier scene ...")
     reset_generated_classes(repository)
     print(f"  {SemanticAnnotationFilePaths.GENERATED_CLASSES_FILE.value}")
+
+    print("rebuilding the ORM without them ...")
+    regenerate_orm()
 
     print("reading the ontology out ...")
     export_ontology()

@@ -473,12 +473,17 @@ def build(arguments: argparse.Namespace) -> None:
     :param arguments: The command line arguments.
     """
     output = arguments.output_dir
-    refuse_to_write_over(output)
+    refuse_to_write_over(output, arguments.overwrite)
     output.mkdir(parents=True, exist_ok=True)
 
     loader = WarsawWorldLoader(
         input_directory=arguments.scene_directory,
         render_resolution=tuple(arguments.resolution),
+        deciding_resolution=(
+            tuple(arguments.deciding_resolution)
+            if arguments.deciding_resolution
+            else None
+        ),
     )
     segments: Dict[str, LabelSegment] = {
         str(segment.name): segment for segment in loader.label_segments
@@ -692,6 +697,23 @@ def main() -> None:
         default=(1024, 768),
         metavar=("WIDTH", "HEIGHT"),
         help="Size of the rendered images (default: 1024 768).",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Write over output already in the directory, which is what this step's "
+        "second pass over one run does once the vocabulary is known.",
+    )
+    parser.add_argument(
+        "--deciding-resolution",
+        type=int,
+        nargs=2,
+        default=None,
+        metavar=("WIDTH", "HEIGHT"),
+        help="Draw the renders made only to choose a viewpoint at this size rather "
+        "than full size. They are thrown away either way, but asking small can answer "
+        "differently, so it is off unless asked for. 256 192 is a sixteenth of the "
+        "pixels.",
     )
     parser.add_argument(
         "--best-viewpoint",
