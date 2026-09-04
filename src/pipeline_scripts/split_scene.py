@@ -27,6 +27,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
+
 
 from experiments.warsaw.scene_split import (
     Ownership,
@@ -208,6 +210,14 @@ def build(arguments: argparse.Namespace) -> None:
         directory=arguments.mesh_directory,
     )
     print(f"the world holds {len(world.bodies)} bodies")
+
+    # The faces each body is made of, keyed by the name it carries everywhere else. The
+    # world built here dies with the process, so without this the split would have to be
+    # derived again from the answers to be used, and a later answer would silently give
+    # a different partition than the one that was reported.
+    faces_path = arguments.output.with_name(f"{arguments.output.stem}_faces.npz")
+    np.savez_compressed(faces_path, **{name: kept for name, kept in split.faces.items()})
+    print(f"the bodies' faces written to {faces_path}")
 
     arguments.output.write_text(
         json.dumps(

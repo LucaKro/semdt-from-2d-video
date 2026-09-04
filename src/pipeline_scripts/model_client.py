@@ -63,10 +63,18 @@ def text_part(text: str) -> Dict[str, Any]:
 def image_part(image: Path) -> Dict[str, Any]:
     """
     :param image: The PNG to show.
+    :return: It, as a part of a message.
+    """
+    return rendered_part(Path(image).read_bytes())
+
+
+def rendered_part(image: bytes) -> Dict[str, Any]:
+    """
+    :param image: A PNG as it came out of a renderer, never written to disk.
     :return: It, as a part of a message, carried inline rather than by URL so that
         nothing has to be hosted for a model to see it.
     """
-    encoded = base64.b64encode(Path(image).read_bytes()).decode("utf-8")
+    encoded = base64.b64encode(image).decode("utf-8")
     return {
         "type": "image_url",
         "image_url": {"url": f"data:image/png;base64,{encoded}"},
