@@ -62,14 +62,12 @@ and everything built on the ontology afterwards -- so judge the class, not the o
 the pictures. Say yes only if a thing of the first class can, in general, have a thing of
 the second as one of its structural parts.
 
-Say no if:
-- the part can already be reached through something the class holds, in which case the
-  paths are listed for you: a field of its own would let it mount beside the thing it is
-  really a part of,
-- the objects would be better served by a class of their own that has the mixin,
-- the overlap is something other than a part: resting on it, stored inside it, or two
-  labels covering the same surface,
-- the part more plausibly belongs to something else the first class already holds.
+You are shown what the class holds and what those parts hold in turn, which is what
+the ontology models today. Judge from that and from the pictures.
+
+Say no if the objects would be better served by a class of their own that has the mixin,
+or if the overlap is something other than a part: resting on it, stored inside it, or
+two labels covering the same surface.
 
 Answer with JSON and nothing else:
 {"amend": true, "confidence": 0.0, "reason": "one sentence"}"""
@@ -198,37 +196,19 @@ def describe(annotation_class: Type) -> str:
     return "\n".join(lines)
 
 
-def paths_to(whole: Type, part: Type, maximum_depth: int = 3) -> List[str]:
+def held_parts(annotation_class: Type) -> List[Type]:
     """
-    Report how a part can already be reached from a class through what it holds.
+    Report the classes a class can hold as structural parts.
 
-    This is what makes a proposal redundant rather than wrong: a cabinet holds doors and
-    a door holds a handle, so a cabinet reaches a handle without declaring one, and
-    giving it a field of its own would let a handle mount onto the carcass and skip the
-    door it is actually on. Without these paths the question cannot be answered, since
-    the reason to say no is one relation further away than the class itself.
-
-    :param whole: The class to search from.
-    :param part: The class to reach.
-    :param maximum_depth: How many relations a path may be long.
-    :return: One rendered path per way of reaching it, empty when there is none.
+    :param annotation_class: The class to inspect.
+    :return: The type each of its part-whole fields accepts, each once, in the order
+        the fields are declared.
     """
-    found: List[str] = []
-    frontier = [(whole, whole.__name__, {whole})]
-    for _ in range(maximum_depth):
-        onwards = []
-        for current, rendered, seen in frontier:
-            for relation in part_whole_fields(current):
-                target = relation.part
-                if not isinstance(target, type):
-                    continue
-                path = f"{rendered} -> {relation.field_name} -> {target.__name__}"
-                if issubclass(part, target):
-                    found.append(path)
-                elif target not in seen:
-                    onwards.append((target, path, seen | {target}))
-        frontier = onwards
-    return found
+    held = []
+    for relation in part_whole_fields(annotation_class):
+        if isinstance(relation.part, type) and relation.part not in held:
+            held.append(relation.part)
+    return held
 
 
 def question_for(
@@ -258,18 +238,14 @@ def question_for(
         for relation in introduces
         if relation["kind"] == "part"
     )
-    # Said only when there is something to say. Reporting that no path was found puts
-    # the absence of a reason to refuse where a reason to accept would go, and it gets
-    # read as one: it turned four refusals into acceptances, one of them a Handle that
-    # would hold Doors.
-    reachable = paths_to(known[candidate.whole], known[candidate.part])
+    # What the class holds is not enough to judge by, since what *those* hold is a
+    # relation further away and often decides it -- a cabinet holds doors and a door
+    # holds a handle. Reported as structure and nothing else: what follows from it is
+    # the question being asked, not something to answer in the asking.
+    onwards = [describe(held) for held in held_parts(known[candidate.whole])]
     already = (
-        f"## How a {candidate.part} can already be reached\n"
-        + "\n".join(reachable)
-        + "\nA part reachable through something the class already holds needs no field "
-        "of its own: mounting it directly onto the class would put it beside the thing "
-        "it is really a part of.\n\n"
-        if reachable
+        "## What those parts hold in turn\n" + "\n".join(onwards) + "\n\n"
+        if onwards
         else ""
     )
     content = [
