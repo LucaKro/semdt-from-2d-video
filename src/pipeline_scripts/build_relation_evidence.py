@@ -120,6 +120,32 @@ def exemplars(relations: SegmentRelations) -> Dict[str, str]:
     return best
 
 
+def neighbourhood(
+    relations: SegmentRelations,
+    segments: Dict[str, LabelSegment],
+    names: List[str],
+) -> List[LabelSegment]:
+    """
+    Gather what a context view has to show for its subject to be recognisable.
+
+    A picture of the whole room is useless for anything small -- a mug covers none of it.
+    Framed on the mug together with the segments measured to stand nearest it, the same
+    mug covers a tenth of the picture, and what surrounds it is what says which mug it
+    is. The neighbours come from the same measurement the rest of the evidence does, so
+    the neighbourhood is not a radius anyone chose.
+
+    :param relations: The measured scene.
+    :param segments: The scene's segments by name.
+    :param names: The segments the view is about.
+    :return: Those segments together with the ones measured to stand near them.
+    """
+    wanted = set(names)
+    for name in names:
+        for pair in relations.pairs_of(name):
+            wanted.update((pair.one, pair.other))
+    return [segments[name] for name in sorted(wanted)]
+
+
 def write_images(images: Dict[str, bytes], directory: Path, prefix: str) -> List[str]:
     """
     :param images: The renders to write, by viewpoint.
@@ -240,6 +266,9 @@ def build(arguments: argparse.Namespace) -> None:
                     viewpoints=arguments.viewpoints,
                     headless=arguments.headless,
                     choose_viewpoint=arguments.best_viewpoint,
+                    context_segments=neighbourhood(
+                        relations, segments, [entry["exemplar"]]
+                    ),
                 ),
                 output / "exemplars",
                 entry["label"],
@@ -266,6 +295,9 @@ def build(arguments: argparse.Namespace) -> None:
                     viewpoints=arguments.viewpoints,
                     headless=arguments.headless,
                     choose_viewpoint=arguments.best_viewpoint,
+                    context_segments=neighbourhood(
+                        relations, segments, [record["one"], record["other"]]
+                    ),
                 ),
                 output / "adjudications",
                 f"{record['one']}__{record['other']}",
@@ -336,8 +368,10 @@ def main() -> None:
     parser.add_argument(
         "--viewpoints",
         nargs="+",
-        default=["front_left", "back_right"],
-        help="Which viewpoints to render (default: front_left back_right).",
+        default=None,
+        help="Which viewpoints to render. Defaults to two of the four when every "
+        "render is kept, and to all four with --best-viewpoint, which renders them "
+        "only to decide between them and keeps one.",
     )
     parser.add_argument(
         "--resolution",
@@ -357,7 +391,12 @@ def main() -> None:
     parser.add_argument(
         "--headless", action="store_true", help="Render without opening a window."
     )
-    build(parser.parse_args())
+    arguments = parser.parse_args()
+    if arguments.viewpoints is None:
+        arguments.viewpoints = (
+            None if arguments.best_viewpoint else ["front_left", "back_right"]
+        )
+    build(arguments)
 
 
 if __name__ == "__main__":
