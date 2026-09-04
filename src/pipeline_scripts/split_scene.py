@@ -41,6 +41,11 @@ from experiments.warsaw.scene_split import (
 )
 from experiments.warsaw.segment_relations import ClaimantGroup, claimant_groups
 from experiments.warsaw.world_loader import WarsawWorldLoader
+from krrood.ormatic.data_access_objects.helper import to_dao
+from semantic_digital_twin.orm.ormatic_interface import Base, WorldMappingDAO
+from semantic_digital_twin.orm.utils import semantic_digital_twin_sessionmaker
+from semantic_digital_twin.world import World
+from sqlalchemy.orm import Session
 from semantic_digital_twin.semantic_annotations.taxonomy_export import annotation_classes
 from semantic_digital_twin.world_description.world_entity import SemanticAnnotation
 
@@ -168,6 +173,22 @@ def report(
         print(f"      {', '.join(sorted(lost))}")
 
 
+def persist(world: World) -> int:
+    """
+    Write a world to the database.
+
+    :param world: The world to write.
+    :return: The id it was written under, which is what the steps after this one take.
+    """
+    engine = semantic_digital_twin_sessionmaker()().bind
+    Base.metadata.create_all(bind=engine)
+    with Session(engine) as session:
+        stored: WorldMappingDAO = to_dao(world)
+        session.add(stored)
+        session.commit()
+        return stored.database_id
+
+
 def build(arguments: argparse.Namespace) -> None:
     """
     Split the scene named on the command line.
@@ -203,13 +224,24 @@ def build(arguments: argparse.Namespace) -> None:
     print(f"\n{len(carried)} pairings carried past the split")
 
     print("\nbuilding the bodies ...")
+    directory = arguments.mesh_directory
+    if directory is None and arguments.persist:
+        # A world in the database points at the files its meshes were written to, and
+        # the place they go by default is emptied when this process ends.
+        directory = evidence / "meshes"
+        print(f"writing the meshes to {directory}, since the world is to be kept")
     world = split_world(
         loader.scene.mesh,
         split.faces,
         WarsawWorldLoader.SOURCE_TO_WORLD,
-        directory=arguments.mesh_directory,
+        directory=directory,
     )
     print(f"the world holds {len(world.bodies)} bodies")
+
+    identities = {str(body.name.name): str(body.id) for body in world.bodies}
+    world_db_id = persist(world) if arguments.persist else None
+    if world_db_id is not None:
+        print(f"the world was written to the database as {world_db_id}")
 
     # The faces each body is made of, keyed by the name it carries everywhere else. The
     # world built here dies with the process, so without this the split would have to be
@@ -223,8 +255,16 @@ def build(arguments: argparse.Namespace) -> None:
         json.dumps(
             {
                 "scene": str(loader.scene.mesh_path),
+                "world_db_id": world_db_id,
+                # The name is what everything else addresses a body by, and the world
+                # addresses it by an id of its own; a step reading the world back needs
+                # both to say the same thing.
                 "bodies": {
-                    name: {"faces": int(len(kept)), "label": labels[name]}
+                    name: {
+                        "faces": int(len(kept)),
+                        "label": labels[name],
+                        "id": identities.get(name),
+                    }
                     for name, kept in sorted(split.faces.items())
                 },
                 "emptied": {
@@ -260,6 +300,11 @@ def main() -> None:
         default=None,
         help="Where to write what the split did, by default split.json beside the "
         "evidence it was made from.",
+    )
+    parser.add_argument(
+        "--persist",
+        action="store_true",
+        help="Write the world to the database and record the id it was written under.",
     )
     parser.add_argument(
         "--mesh-directory",
