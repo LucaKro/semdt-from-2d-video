@@ -29,6 +29,13 @@ import numpy as np
 
 from experiments.warsaw.world_loader import LabelSegment, WarsawWorldLoader
 
+from semantic_digital_twin.semantic_annotations.taxonomy_export import (
+    annotation_classes,
+    compose_class,
+    relations_of,
+)
+from semantic_digital_twin.world_description.world_entity import SemanticAnnotation
+
 from pipeline_scripts import model_client
 from pipeline_scripts.locations import TAXONOMY
 
@@ -119,6 +126,73 @@ def question_for(
     return content
 
 
+def with_proposals(
+    taxonomy: Dict[str, Any], vocabulary: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Put the classes this run proposed beside the ones it inherited.
+
+    The exported taxonomy is the one that is committed, and it is the same file for
+    every run; a class the vocabulary step proposed exists only in this run's own
+    directory until the last step generates it. So a body was described as "labelled
+    kitchen_island, which was read as KitchenIsland" while ``KitchenIsland`` appeared
+    nowhere in the ontology it was being asked to choose a name from -- and naming an
+    existing class instead is then the only coherent answer left. Once it was
+    ``CounterTop``, which accepts no drawer, and the eight drawers the island's own
+    composition was built to hold could not be mounted.
+
+    A proposal is an answer about the same object from the step before, so it belongs
+    where the model is looking rather than in a clause it cannot act on. It is marked as
+    proposed, and disagreeing with it stays available -- the split can leave a body that
+    is no longer what its label said -- but it becomes a choice rather than the only way
+    out.
+
+    :param taxonomy: The exported taxonomy.
+    :param vocabulary: What the vocabulary step answered per label.
+    :return: The taxonomy, with a class for each proposal that can be composed.
+    """
+    known = annotation_classes(SemanticAnnotation)
+    already = {node["name"] for node in taxonomy["classes"]}
+
+    added = []
+    for label, answer in sorted((vocabulary.get("labels") or {}).items()):
+        name = answer.get("class")
+        if not answer.get("is_new_class") or not name or name in already:
+            continue
+        superclass = known.get(answer.get("superclass"))
+        mixins = [known[one] for one in answer.get("mixins") or [] if one in known]
+        if superclass is None:
+            continue
+        try:
+            composed = compose_class(name, superclass, mixins)
+        except TypeError:
+            # The vocabulary step already reports a composition it cannot build; there
+            # is nothing to add here and nothing this step can do about it.
+            continue
+
+        node: Dict[str, Any] = {
+            "name": name,
+            "bases": [base.__name__ for base in composed.__bases__],
+            "proposed_for_label": label,
+        }
+        relations = relations_of(composed)
+        if relations:
+            node["relations"] = [relation.to_json() for relation in relations]
+        added.append(node)
+        already.add(name)
+
+    if not added:
+        return taxonomy
+    return {
+        **taxonomy,
+        "classes": taxonomy["classes"] + added,
+        "note": taxonomy["note"]
+        + " A class marked 'proposed_for_label' is not in the ontology yet: an earlier "
+        "step read that label as this class and it is built when the run ends. Name it "
+        "when it fits the object, exactly as you would one already there.",
+    }
+
+
 def check(answered: Dict[str, Any], group: Sequence[LabelSegment]) -> List[str]:
     """
     Say what is wrong with an answer about a group, if anything.
@@ -165,8 +239,8 @@ def build(arguments: argparse.Namespace) -> None:
     :param arguments: The command line arguments.
     """
     evidence = arguments.evidence_directory
-    taxonomy = json.loads(TAXONOMY.read_text())
     vocabulary = json.loads((evidence / "vocabulary.json").read_text())
+    taxonomy = with_proposals(json.loads(TAXONOMY.read_text()), vocabulary)
 
     loader = WarsawWorldLoader(input_directory=arguments.scene_directory)
     bodies = split_segments(loader, evidence / "split_faces.npz")

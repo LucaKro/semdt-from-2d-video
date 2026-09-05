@@ -35,13 +35,14 @@ from typing import Any, Dict, List, Optional, Type
 import semantic_digital_twin
 from semantic_digital_twin.semantic_annotations.in_memory_builder import (
     SemanticAnnotationClassBuilder,
-    SemanticAnnotationFilePaths,
 )
 from semantic_digital_twin.semantic_annotations.taxonomy_export import (
     annotation_classes,
     in_base_order,
 )
 from semantic_digital_twin.world_description.world_entity import SemanticAnnotation
+
+from pipeline_scripts import run_classes
 
 TEMPLATE = "dataclass_template.py.jinja"
 """
@@ -87,16 +88,19 @@ def wanted_classes(
     return wanted
 
 
-def generate_missing(wanted: Dict[str, List[str]], known: Dict[str, Type]) -> List[str]:
+def generate_missing(
+    wanted: Dict[str, List[str]], known: Dict[str, Type], run: Path
+) -> List[str]:
     """
     Write the classes a scene needs that the taxonomy does not have.
 
-    The file is written whole rather than appended to, since it is what the taxonomy
-    reset empties between runs: a class one scene needed is not a class the next one
-    starts with.
+    The file is written whole rather than appended to: a class one scene needed is not a
+    class the next one starts with, and nothing outside this run should ever import it.
 
     :param wanted: Per class name, the names of the classes to derive it from.
     :param known: The taxonomy's classes by name.
+    :param run: The run's directory, which is where they are written -- they belong to
+        the run that proposed them, not to the ontology every later run starts from.
     :return: The names that were generated.
     """
     builders, generated = [], []
@@ -120,15 +124,21 @@ def generate_missing(wanted: Dict[str, List[str]], known: Dict[str, Type]) -> Li
 
     if builders:
         SemanticAnnotationClassBuilder.write_classes_to_file(
-            builders, Path(SemanticAnnotationFilePaths.GENERATED_CLASSES_FILE.value)
+            builders, run_classes.path_in(run)
         )
     return generated
 
 
-def regenerate_orm() -> Optional[str]:
+def regenerate_orm(run: Path) -> Optional[str]:
     """
-    Rebuild the ORM so the database knows the generated classes.
+    Rebuild the ORM so the database knows the classes this run generated.
 
+    Run in a new interpreter with the run's directory at the front of the annotations
+    package's search path: the generator finds classes by walking that path, so the
+    run's file is the ``generated_classes`` it maps, without the generator being told
+    anything and without the classes ever being written into the ontology's own package.
+
+    :param run: The run's directory.
     :return: What went wrong, or None when it was rebuilt.
     """
     script = (
@@ -138,8 +148,21 @@ def regenerate_orm() -> Optional[str]:
     )
     if not script.exists():
         return f"the ORM generator is not at {script}"
+
+    program = (
+        "import importlib.util, sys\n"
+        "from pipeline_scripts import run_classes\n"
+        "run_classes.use(sys.argv[1])\n"
+        "specification = importlib.util.spec_from_file_location("
+        "'generate_orm', sys.argv[2])\n"
+        "generator = importlib.util.module_from_spec(specification)\n"
+        "specification.loader.exec_module(generator)\n"
+        "generator.generate_orm()\n"
+    )
     finished = subprocess.run(
-        [sys.executable, str(script)], capture_output=True, text=True
+        [sys.executable, "-c", program, str(Path(run).resolve()), str(script)],
+        capture_output=True,
+        text=True,
     )
     return None if finished.returncode == 0 else finished.stderr.strip()[-2000:]
 
@@ -152,6 +175,9 @@ def mount(arguments: argparse.Namespace) -> None:
 
     :param arguments: The command line arguments.
     """
+    # Before the ORM is imported, so that the classes it names are this run's.
+    run_classes.use(arguments.evidence_directory)
+
     from krrood.ormatic.data_access_objects.helper import to_dao
     from semantic_digital_twin.orm.ormatic_interface import Base, WorldMappingDAO
     from semantic_digital_twin.orm.utils import semantic_digital_twin_sessionmaker
@@ -263,11 +289,26 @@ Written by the run that built it, so the id is the one it was written under.
 
 import argparse
 from collections import Counter
+from pathlib import Path
 
-from semantic_digital_twin.orm.ormatic_interface import WorldMappingDAO
-from semantic_digital_twin.orm.utils import semantic_digital_twin_sessionmaker
-from semantic_digital_twin.spatial_computations.raytracer import RayTracer
-from sqlalchemy.orm import Session
+# The classes this run generated live beside this script, and the world names them. This
+# has to happen before the ORM is imported, or the ORM looks for them in the ontology's
+# own package, where they deliberately are not.
+from pipeline_scripts import run_classes, run_database
+
+HERE = Path(__file__).resolve().parent
+run_classes.use(HERE)
+
+# The world was written into a schema of this run's own, so this is where to look for
+# it. Set before the sessionmaker is called, which is what reads it.
+run_database.use(HERE)
+
+from semantic_digital_twin.orm.ormatic_interface import WorldMappingDAO  # noqa: E402
+from semantic_digital_twin.orm.utils import (  # noqa: E402
+    semantic_digital_twin_sessionmaker,
+)
+from semantic_digital_twin.spatial_computations.raytracer import RayTracer  # noqa: E402
+from sqlalchemy.orm import Session  # noqa: E402
 
 ANNOTATED_WORLD = {annotated}
 SPLIT_WORLD = {split}
@@ -317,7 +358,10 @@ def main() -> None:
     ]
     print()
     print(f"{{len(held)}} relations that hold something:")
-    for whole, field, part in sorted(held)[:20]:
+    # Sorted by name and cut short, the list stopped at the cabinets and never reached
+    # the island holding its eight drawers, which is the thing worth seeing. The whole
+    # list is one screen, so it is printed.
+    for whole, field, part in sorted(held):
         def named(one) -> str:
             root = getattr(one, "root", None)
             return str(root.name.name) if root is not None else str(one)
@@ -453,11 +497,11 @@ def build(arguments: argparse.Namespace) -> None:
     known = annotation_classes(SemanticAnnotation)
     print(f"{len(wanted)} classes over {len(classifications['bodies'])} bodies")
 
-    generated = generate_missing(wanted, known)
+    generated = generate_missing(wanted, known, evidence)
     if generated:
         print(f"generated {len(generated)}: {', '.join(generated)}")
         print("regenerating the ORM ...")
-        failure = regenerate_orm()
+        failure = regenerate_orm(evidence)
         if failure:
             raise SystemExit(f"the ORM could not be regenerated:\n{failure}")
     else:

@@ -18,12 +18,60 @@ from __future__ import annotations
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from enum import Enum, StrEnum
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from pipeline_scripts.models import Model
+from pipeline_scripts import run_database
+
 
 # %% ── settings ──────────────────────────────────────────────────────────────────────
+
+
+class Model(StrEnum):
+    """
+    A model to put the pipeline's questions to.
+
+    The value is the identifier OpenRouter knows it by.
+    """
+
+    QWEN3_VL_32B = "qwen/qwen3-vl-32b-instruct"
+    """
+    $0.10 per million prompt tokens. Dense 32B; the cheapest of these.
+    """
+
+    QWEN3_VL_30B = "qwen/qwen3-vl-30b-a3b-instruct"
+    """
+    $0.15. Mixture-of-experts, 3B active. What every run in this repository so far used,
+    and what the reported numbers come from.
+    """
+
+    GPT_5_6_LUNA = "openai/gpt-5.6-luna"
+    """
+    $0.20.
+    """
+
+    GEMINI_2_5_FLASH = "google/gemini-2.5-flash"
+    """
+    $0.30.
+    """
+
+    CLAUDE_HAIKU_4_5 = "anthropic/claude-haiku-4.5"
+    """
+    $1.00.
+    """
+
+    GEMINI_2_5_PRO = "google/gemini-2.5-pro"
+    """
+    $1.25.
+    """
+
+    CLAUDE_SONNET_4_5 = "anthropic/claude-sonnet-4.5"
+    """
+    $3.00. Worth trying on the steps that were unstable: the ownership answers vary
+    between runs on about six of the thirty-three patterns, and the vocabulary step
+    composes a class differently from one run to the next.
+    """
 
 
 @dataclass
@@ -253,8 +301,17 @@ def main(settings: Settings = SETTINGS) -> None:
         raise SystemExit("the run could not be prepared")
 
     run = Path(prepared.stdout.split()[-1])
+
+    # Every step is a child of this process, so pointing this one at the run's schema
+    # points all of them at it, and none of them has to be told which.
+    schema = run_database.use(run)
+
     planned = steps(settings, run)
-    print(f"\n{settings.model.name} over {len(planned)} steps into {run.name}", flush=True)
+    print(
+        f"\n{settings.model.name} over {len(planned)} steps into {run.name}, "
+        f"writing to schema {schema}",
+        flush=True,
+    )
 
     for number, step in enumerate(planned, start=1):
         if not run_step(step, number, len(planned)):

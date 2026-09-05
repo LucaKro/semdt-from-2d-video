@@ -17,6 +17,7 @@ scene and is therefore the same for every run.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +28,7 @@ from semantic_digital_twin.semantic_annotations.in_memory_builder import (
     SemanticAnnotationFilePaths,
 )
 
+from pipeline_scripts import run_database
 from pipeline_scripts.locations import (
     RUNS_DIRECTORY,
     SHARED_DIRECTORY,
@@ -120,6 +122,44 @@ def regenerate_orm() -> None:
     aside.unlink(missing_ok=True)
 
 
+def prepare_the_schema(run: Path) -> str:
+    """
+    Make the run's own schema and build the ORM's tables inside it.
+
+    Built in a new interpreter for the same reason the export is: the ORM was just
+    rewritten and this one is holding the version from before that. The tables are made
+    by the ORM that is about to write to them, so a run never meets a table another run
+    left standing.
+
+    :param run: The directory this run writes into.
+    :return: The schema it writes into.
+    :raises SystemExit: If the schema cannot be made.
+    """
+    schema = run_database.schema_for(run)
+    run_database.create(schema)
+
+    program = (
+        "from semantic_digital_twin.orm.ormatic_interface import Base\n"
+        "from semantic_digital_twin.orm.utils import "
+        "semantic_digital_twin_sessionmaker\n"
+        "engine = semantic_digital_twin_sessionmaker()().bind\n"
+        "Base.metadata.create_all(bind=engine)\n"
+        "print(len(Base.metadata.tables))\n"
+    )
+    finished = subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True,
+        text=True,
+        env={**os.environ, run_database.VARIABLE: run_database.uri_in(schema)},
+    )
+    if finished.returncode != 0:
+        raise SystemExit(
+            f"the run's schema could not be built:\n{finished.stderr.strip()[-2000:]}"
+        )
+    print(f"  {finished.stdout.split()[-1]} tables in schema {schema}")
+    return schema
+
+
 def export_ontology() -> None:
     """
     Write out what every run is allowed to read: the taxonomy as a model reads it.
@@ -184,6 +224,10 @@ def build(arguments: argparse.Namespace) -> None:
     export_ontology()
 
     directory = new_run_directory(arguments.runs_directory)
+
+    print("making the run its own schema in the database ...")
+    prepare_the_schema(directory)
+
     print(f"\nthe run writes into {directory}")
 
 
