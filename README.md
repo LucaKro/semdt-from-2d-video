@@ -2,6 +2,18 @@
 
 Constructs a semantic digital twin from 2D scene imagery using VLM-based object classification and ontology-driven annotation.
 
+What this repository holds is the HM3D flow: render a scene, ask a model what the objects
+are, resolve the classes and persist the world.
+
+**The labelled-mesh pipeline lives elsewhere.** Turning one labelled PLY scan of a room
+into an annotated, hierarchical world -- measuring how the labels overlap, asking which
+class each label means, deciding whose a contested face is, cutting the mesh into bodies
+and mounting the parts into their wholes -- moved into the CRAM workspace, at
+`cognitive_robot_abstract_machine/experiments/src/experiments/warsaw/pipeline/`. It is run
+with `python -m experiments.warsaw.pipeline.pipeline` and takes no arguments; everything a
+run can be told is a field of `PipelineSettings`. Its scenes and its output live beside it
+and are not committed.
+
 ## Prerequisites
 
 - Python 3.10+
@@ -224,7 +236,7 @@ When a scene has been split into rooms, `persist_annotations.py` accepts multipl
 ```bash
 python scripts/load_and_render_scene.py                 # list worlds in the DB
 python scripts/load_and_render_scene.py <world_name>    # render a persisted world
-python -m pipeline_scripts.utils.inspect_camera_pose <obj_dir>   # interactive camera pose tuning
+python -m semdt_2d_video.utils.inspect_camera_pose <obj_dir>   # interactive camera pose tuning
 ```
 
 ### Evaluation & paper figures

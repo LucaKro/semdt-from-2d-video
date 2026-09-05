@@ -4,6 +4,10 @@ Pipeline for constructing semantic digital twins from 3D scene datasets using VL
 
 ## Architecture
 
+The labelled-mesh pipeline (one PLY scan of a room -> an annotated hierarchical world)
+moved to `cognitive_robot_abstract_machine/experiments/src/experiments/warsaw/pipeline/`.
+What remains here is the HM3D flow below.
+
 Three-phase pipeline:
 1. **extract_class_structure.py** - Loads a 3D scene, renders from 3 camera viewpoints, highlights groups of objects in distinct colors, queries a VLM (Qwen-VL via OpenRouter) to classify each object against a semantic taxonomy.
 2. **refine_class_structure.py** - Takes VLM classifications, resolves constructor field dependencies (recursively), instantiates SemanticAnnotation subclasses, persists to PostgreSQL.
