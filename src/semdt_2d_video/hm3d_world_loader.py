@@ -281,7 +281,7 @@ class HM3DWorldLoader:
                     mesh=combined,
                     origin=HomogeneousTransformationMatrix(),
                 )
-                mesh_shape.dye(Color(R=r / 255.0, G=g / 255.0, B=b / 255.0))
+                mesh_shape.dye(Color.from_rgba(red=r / 255.0, green=g / 255.0, blue=b / 255.0))
                 shape_collection = ShapeCollection([mesh_shape])
 
                 body = Body(
